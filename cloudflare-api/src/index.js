@@ -2,10 +2,10 @@ const PROVIDERS = {
   instagram: { name: "Instagram", limit: 2200, scopes: ["instagram_business_basic", "instagram_business_content_publish"] },
   facebook: { name: "Facebook Page", limit: 63206, scopes: ["pages_show_list", "pages_manage_posts", "pages_read_engagement"] },
   linkedin: { name: "LinkedIn Page", limit: 3000, scopes: ["openid", "profile", "r_organization_admin", "w_organization_social"] },
-  x: { name: "X", limit: 280, scopes: ["tweet.read", "tweet.write", "users.read", "offline.access", "media.write"] }, threads: { name: "Threads", limit: 500, scopes: ["threads_basic", "threads_content_publish"] }, pinterest: { name: "Pinterest", limit: 800 },
+  x: { name: "X", limit: 280, scopes: ["tweet.read", "tweet.write", "users.read", "offline.access", "media.write"] }, threads: { name: "Threads", limit: 500, scopes: ["threads_basic", "threads_content_publish"] }, pinterest: { name: "Pinterest", limit: 800, scopes: ["boards:read", "pins:write"] },
   bluesky: { name: "Bluesky", limit: 300 }, tiktok: { name: "TikTok", limit: 2200 }, twitch: { name: "Twitch", limit: 500 }
 };
-const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads", "x"];
+const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"];
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const COOKIE = "klirline_session";
@@ -197,7 +197,8 @@ function providerStatus(id, env) {
     facebook: ["META_APP_ID", "META_APP_SECRET", "FACEBOOK_REDIRECT_URI", "FACEBOOK_PAGE_ID"],
     linkedin: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_REDIRECT_URI", "LINKEDIN_ORGANIZATION_URN", "LINKEDIN_VERSION"],
     threads: ["THREADS_APP_ID", "THREADS_APP_SECRET", "THREADS_REDIRECT_URI"],
-    x: ["X_CLIENT_ID", "X_CLIENT_SECRET", "X_REDIRECT_URI"]
+    x: ["X_CLIENT_ID", "X_CLIENT_SECRET", "X_REDIRECT_URI"],
+    pinterest: ["PINTEREST_APP_ID", "PINTEREST_APP_SECRET", "PINTEREST_REDIRECT_URI"]
   }[id];
   if (!keys) return { configured: "out-of-scope", available: false };
   return { configured: keys.every((key) => Boolean(env[key])) ? "ready" : "missing-credentials", available: true };
@@ -224,7 +225,8 @@ function providerEnv(provider, env) {
     facebook: { id: env.META_APP_ID, secret: env.META_APP_SECRET, redirect: env.FACEBOOK_REDIRECT_URI, authorize: "https://www.facebook.com/dialog/oauth", token: "https://graph.facebook.com/oauth/access_token", scopeSep: ",", scopes: PROVIDERS.facebook.scopes },
     linkedin: { id: env.LINKEDIN_CLIENT_ID, secret: env.LINKEDIN_CLIENT_SECRET, redirect: env.LINKEDIN_REDIRECT_URI, authorize: "https://www.linkedin.com/oauth/v2/authorization", token: "https://www.linkedin.com/oauth/v2/accessToken", scopeSep: " ", scopes: PROVIDERS.linkedin.scopes },
     threads: { id: env.THREADS_APP_ID, secret: env.THREADS_APP_SECRET, redirect: env.THREADS_REDIRECT_URI, authorize: "https://threads.net/oauth/authorize", token: "https://graph.threads.net/oauth/access_token", scopeSep: ",", scopes: PROVIDERS.threads.scopes },
-    x: { id: env.X_CLIENT_ID, secret: env.X_CLIENT_SECRET, redirect: env.X_REDIRECT_URI, authorize: "https://x.com/i/oauth2/authorize", token: "https://api.x.com/2/oauth2/token", scopeSep: " ", scopes: PROVIDERS.x.scopes }
+    x: { id: env.X_CLIENT_ID, secret: env.X_CLIENT_SECRET, redirect: env.X_REDIRECT_URI, authorize: "https://x.com/i/oauth2/authorize", token: "https://api.x.com/2/oauth2/token", scopeSep: " ", scopes: PROVIDERS.x.scopes },
+    pinterest: { id: env.PINTEREST_APP_ID, secret: env.PINTEREST_APP_SECRET, redirect: env.PINTEREST_REDIRECT_URI, authorize: "https://www.pinterest.com/oauth/", token: "https://api.pinterest.com/v5/oauth/token", scopeSep: ",", scopes: PROVIDERS.pinterest.scopes }
   }[provider];
 }
 async function oauthStart(provider, user, env, db) {
@@ -280,6 +282,12 @@ async function exchangeOAuth(provider, code, env, verifier = null) {
     const response = await fetch(cfg.token, { method: "POST", headers, body }); const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.access_token) throw httpError("token-exchange-failed", 502); return data;
   }
+  if (provider === "pinterest") {
+    const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: cfg.redirect });
+    const response = await fetch(cfg.token, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", Authorization: `Basic ${btoa(`${cfg.id}:${cfg.secret}`)}` }, body });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.access_token) throw httpError("token-exchange-failed", 502); return data;
+  }
   const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: cfg.redirect, client_id: cfg.id, client_secret: cfg.secret });
   const response = await fetch(cfg.token, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body }); const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.access_token) throw httpError("token-exchange-failed", 502); return data;
@@ -312,6 +320,10 @@ async function completeOAuth(request, env, db) {
   } else if (provider === "x") {
     const profile = await graphJson("https://api.x.com/2/users/me?user.fields=id,name,username", token.access_token);
     account = { id: String(profile.data?.id || ""), label: profile.data?.username ? `@${profile.data.username}` : String(profile.data?.name || "") };
+  } else if (provider === "pinterest") {
+    const profile = await graphJson("https://api.pinterest.com/v5/user_account", token.access_token);
+    const username = String(profile.username || profile.id || "");
+    account = { id: username, label: profile.username ? `@${profile.username}` : String(profile.business_name || "Pinterest") , username: profile.username || null };
   } else {
     const identity = await graphJson("https://api.linkedin.com/v2/userinfo", token.access_token);
     if (!env.LINKEDIN_ORGANIZATION_URN || !/^urn:li:organization:\d+$/.test(env.LINKEDIN_ORGANIZATION_URN)) throw httpError("linkedin-organization-urn-required", 503);
@@ -324,7 +336,7 @@ async function completeOAuth(request, env, db) {
     account = { id: env.LINKEDIN_ORGANIZATION_URN, label: env.LINKEDIN_ORGANIZATION_NAME || "LinkedIn organization", memberId: identity.sub };
   }
   if (!account?.id || !account?.label) throw httpError("account-identity-missing", 502);
-  const sealed = await sealToken(JSON.stringify({ accessToken: connectionToken, refreshToken: ["linkedin", "x"].includes(provider) ? token.refresh_token || null : null, refreshExpiresAt: token.refresh_token_expires_in ? new Date(Date.now() + token.refresh_token_expires_in * 1000).toISOString() : null }), env); const id = randomId();
+  const sealed = await sealToken(JSON.stringify({ accessToken: connectionToken, refreshToken: ["linkedin", "x", "pinterest"].includes(provider) ? token.refresh_token || null : null, refreshExpiresAt: token.refresh_token_expires_in ? new Date(Date.now() + token.refresh_token_expires_in * 1000).toISOString() : null }), env); const id = randomId();
   await db.prepare(`INSERT INTO connections(id,user_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,expires_at,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET id=excluded.id,account_id=excluded.account_id,account_label=excluded.account_label,account_json=excluded.account_json,scopes_json=excluded.scopes_json,token_ciphertext=excluded.token_ciphertext,token_iv=excluded.token_iv,expires_at=excluded.expires_at,created_at=excluded.created_at`)
     .bind(id, record.user_id, provider, String(account.id), account.label, JSON.stringify(account), JSON.stringify(PROVIDERS[provider].scopes), sealed.data, sealed.iv, token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null, nowIso()).run();
@@ -355,6 +367,10 @@ async function currentAccessToken(provider, connection, env) {
     const headers = { "content-type": "application/x-www-form-urlencoded" };
     if (cfg.secret) headers.Authorization = `Basic ${btoa(`${cfg.id}:${cfg.secret}`)}`;
     response = await fetch(cfg.token, { method: "POST", headers, body });
+  } else if (provider === "pinterest" && bundle.refreshToken && (!bundle.refreshExpiresAt || Date.parse(bundle.refreshExpiresAt) > Date.now())) {
+    const cfg = providerEnv("pinterest", env);
+    const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: bundle.refreshToken });
+    response = await fetch(cfg.token, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", Authorization: `Basic ${btoa(`${cfg.id}:${cfg.secret}`)}` }, body });
   } else if (provider === "linkedin" && bundle.refreshToken && (!bundle.refreshExpiresAt || Date.parse(bundle.refreshExpiresAt) > Date.now())) {
     const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: bundle.refreshToken, client_id: env.LINKEDIN_CLIENT_ID, client_secret: env.LINKEDIN_CLIENT_SECRET });
     response = await fetch("https://www.linkedin.com/oauth/v2/accessToken", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
@@ -449,6 +465,12 @@ async function publishOne(provider, connection, text, media, env) {
       const post = await graphJson("https://api.x.com/2/tweets", access, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, ...(mediaId ? { media: { media_ids: [String(mediaId)] } } : {}) }) });
       return { provider, status: "published", postId: post.data?.id || null, message: "ok" };
     }
+    if (provider === "pinterest") {
+      if (!connection.account?.boardId) return { provider, status: "action-required", message: "pinterest-board-selection-required" };
+      if (!media?.publicUrl || !["image/jpeg", "image/png"].includes(media.mime)) return { provider, status: "action-required", message: "pinterest-requires-jpeg-or-png-image" };
+      const pin = await graphJson("https://api.pinterest.com/v5/pins", access, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ board_id: connection.account.boardId, description: text, media_source: { source_type: "image_url", url: media.publicUrl, is_standard: true } }) });
+      return { provider, status: "published", postId: pin.id || null, message: "ok" };
+    }
   } catch (error) {
     return { provider, status: "failed", message: String(error.message || error).slice(0, 240), retryable: !error.status || error.status === 502 };
   }
@@ -471,7 +493,7 @@ async function accountPublish(request, user, env, db) {
   if (!text) throw httpError("empty-text"); if (!targets.length) throw httpError("no-targets");
   for (const provider of targets) {
     if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`);
-    if (provider === "instagram" && !body.mediaId) throw httpError("media-required:instagram");
+    if (["instagram", "pinterest"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`);
     if (provider === "x" && body.mediaId) {
       // The X API currently accepts images up to 5 MB; reject unsupported files before making provider calls.
       const media = body.mediaId ? await getMedia(db, body.mediaId, user.id) : null;
@@ -521,7 +543,7 @@ async function createSchedule(request, user, env, db) {
   if (!text || !targets.length || !body.runAtUTC || !Number.isFinite(runAt.getTime()) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(body.runAtUTC) || runAt.getTime() < Date.now() + 60000) throw httpError("text-targets-future-runAtUTC-required");
   const timezone = String(body.timezone || "UTC").trim();
   try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(runAt); } catch { throw httpError("invalid-time-zone"); }
-  for (const provider of targets) { if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`); if (["instagram"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`); }
+  for (const provider of targets) { if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`); if (["instagram", "pinterest"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`); }
   if (body.mediaId) {
     const media = await getMedia(db, body.mediaId, user.id);
     if (!media) throw httpError("media-not-found", 404);
@@ -773,6 +795,25 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/connections" && request.method === "GET") {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT c.provider,c.account_id,c.account_label,c.account_json,c.scopes_json,c.expires_at,c.created_at FROM connections c JOIN users owner ON owner.id=c.user_id WHERE owner.org_id=? ORDER BY c.provider,c.created_at DESC").bind(user.org_id).all();
     return json((rows.results||[]).map((r)=>({provider:r.provider,account:{...JSON.parse(r.account_json),id:r.account_id,label:r.account_label},scopes:JSON.parse(r.scopes_json),expiresAt:r.expires_at,createdAt:r.created_at})),200,secureHeaders(cors));
+  }
+  if (url.pathname === "/api/pinterest/boards" && request.method === "GET") {
+    const user=await authenticate(request,env,env.DB); const connection=await getConnection(env.DB,user.id,"pinterest");
+    if(!connection) throw httpError("pinterest-not-connected",404);
+    const access=await currentAccessToken("pinterest",connection,env); const boardsUrl=new URL("https://api.pinterest.com/v5/boards"); boardsUrl.searchParams.set("page_size","250");
+    const bookmark=url.searchParams.get("bookmark"); if(bookmark) boardsUrl.searchParams.set("bookmark",bookmark);
+    const result=await graphJson(boardsUrl,access);
+    return json({items:(result.items||[]).map(board=>({id:String(board.id),name:String(board.name||"Tableau Pinterest")})),bookmark:result.bookmark||null},200,secureHeaders(cors));
+  }
+  if (url.pathname === "/api/pinterest/board" && request.method === "POST") {
+    const user=await authenticate(request,env,env.DB,["admin"]); const body=await readJson(request); const boardId=String(body.boardId||"").trim();
+    if(!boardId||boardId.length>128) throw httpError("invalid-pinterest-board");
+    const connection=await getConnection(env.DB,user.id,"pinterest"); if(!connection) throw httpError("pinterest-not-connected",404);
+    const access=await currentAccessToken("pinterest",connection,env); const board=await graphJson(`https://api.pinterest.com/v5/boards/${encodeURIComponent(boardId)}`,access);
+    if(String(board.id||"")!==boardId || (board.owner?.username && connection.account?.username && board.owner.username!==connection.account.username)) throw httpError("pinterest-board-not-owned",403);
+    const account={...connection.account,boardId,boardName:String(board.name||"")};
+    await env.DB.prepare("UPDATE connections SET account_json=? WHERE id=? AND provider='pinterest'").bind(JSON.stringify(account),connection.id).run();
+    await auditEvent(env.DB,user.org_id,user.id,"social.pinterest-board-selected",boardId,{boardName:account.boardName});
+    return json({boardId,boardName:account.boardName},200,secureHeaders(cors));
   }
   if (url.pathname === "/api/posts" && request.method === "GET") {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT p.* FROM posts p JOIN users author ON author.id=p.user_id WHERE author.org_id=? ORDER BY p.created_at DESC LIMIT 200").bind(user.org_id).all();
