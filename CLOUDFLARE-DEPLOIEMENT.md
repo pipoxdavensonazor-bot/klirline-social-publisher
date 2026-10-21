@@ -4,20 +4,21 @@
 
 Le dépôt contient le frontend statique (`index.html`), l’ancien backend Node/Express (`klirline-social-backend/`) et l’API Cloudflare Workers (`cloudflare-api/`). Klirline Social Publisher est un outil interne, pas un service vendu. L’API reste un pilote non déployé et non vérifié avec les comptes réels.
 
-## Frontend sur Cloudflare Pages
+## Frontend — Worker Static Assets
 
-Créer un projet Pages depuis le dépôt GitHub et choisir **Direct Upload / Pages Git integration** selon la configuration Cloudflare. Pour Git integration :
+Le service `klirline-social-publisher` est relié à Workers Builds. Le dépôt fournit maintenant `wrangler.jsonc` à sa racine; `npm run build` copie une liste limitée de fichiers publics vers `site/`, et `npm run deploy` déploie ce dossier au moyen de `wrangler deploy`.
 
-- Framework preset : `None`
-- Build command : laisser vide
-- Build output directory : `.`
+Dans **Workers & Pages → klirline-social-publisher → Settings → Builds**, utiliser :
+
+- Repository : `pipoxdavensonazor-bot/klirline-social-publisher`
+- Production branch : `main`
+- Preview branch de travail : `commercial-readiness` (laisse les builds de cette branche dans les aperçus, sans modifier le Worker de production)
 - Root directory : `/`
+- Build command : `npm run build`
+- Deploy command : `npm run deploy`
+- Preview command : `npx wrangler preview` (pour les branches de prévisualisation seulement)
 
-Le site est constitué de `index.html` et des fichiers statiques à la racine (`privacy.html`, `terms.html`, `deletion.html`). Les changements poussés sur la branche configurée déclencheront les déploiements automatiques Pages. Ces pages légales sont des brouillons avec des champs de l’exploitant à remplir; elles ne doivent pas être présentées comme textes définitifs.
-
-### Si le tableau de bord est configuré comme un Worker
-
-Le site racine est du HTML statique et n’a pas de configuration Wrangler pour le servir comme Worker. Pour le publier, configurez Cloudflare Pages comme ci-dessus. Si vous gardez le service Worker existant, ne relancez pas son build avec `npx wrangler preview`: cette commande échoue sans configuration de prévisualisation et ne déploie pas le site. Réservez un service Worker séparé à `cloudflare-api/` et utilisez `npx wrangler deploy`. Avant d’enregistrer une modification, vérifiez que vous êtes dans le projet voulu et que la racine correspondante est affichée.
+La dernière compilation observée échouait parce que `npx wrangler preview` était configuré comme commande de déploiement. Cette commande crée une prévisualisation et ne met pas le site en production. Enregistrer les réglages ci-dessus puis relancer la compilation depuis le tableau de bord. Ne pas remplacer le Worker frontend par la configuration API de `cloudflare-api/`.
 
 ## API Cloudflare (pilote à installer)
 
@@ -37,7 +38,7 @@ Pour connecter le dépôt à l’API, créez un nouveau service **Workers Builds
 - Nom du Worker : `klirline-social-api`, identique à `name` dans `wrangler.jsonc`
 - Branche de production : la branche choisie pour les mises en production; utilisez la branche de travail seulement si vous voulez explicitement y déployer
 
-Configurez les secrets et ressources Cloudflare pour ce nouveau Worker avant le premier déploiement. Laissez le projet Pages qui sert le frontend à la racine (`/`) avec son répertoire de sortie statique; il ne doit pas publier le Worker API. Après déploiement, mettez l’URL HTTPS de l’API dans **Préférences → Backend et compte** sur le site, puis vérifiez `/api/health`. Les noms exacts des champs du tableau de bord peuvent évoluer; contrôlez la configuration avant d’enregistrer. Documentation Cloudflare : [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) et [troubleshooting](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/).
+Configurez les secrets et ressources Cloudflare pour ce nouveau Worker avant le premier déploiement. Laissez le Worker frontend `klirline-social-publisher` à la racine `/` avec `npm run build` et `npm run deploy`; il ne doit pas publier le Worker API. Après déploiement, mettez l’URL HTTPS de l’API dans **Préférences → Backend et compte** sur le site, puis vérifiez `/api/health`. Les noms exacts des champs du tableau de bord peuvent évoluer; contrôlez la configuration avant d’enregistrer. Documentation Cloudflare : [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) et [troubleshooting](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/).
 
 1. Installer les outils du projet avec `npm install`.
 2. Créer la base D1 : `npx wrangler d1 create klirline-social`. Copier l’identifiant retourné dans `wrangler.jsonc` à la place de `REPLACE_WITH_D1_DATABASE_ID`.
@@ -60,7 +61,7 @@ Depuis la racine du dépôt, lancez `node scripts/cloudflare-preflight.mjs`. Le 
 
 Ordre de mise en service recommandé :
 
-1. Publier le frontend sur Pages avec la racine `/`, sans commande de build et `.` comme sortie; vérifier les trois pages et le domaine public.
+1. Publier le frontend avec le Worker Static Assets de la racine du dépôt; vérifier les pages de l’application et les ressources publiques.
 2. Créer le Worker API distinct avec `cloudflare-api/` comme racine et `npx wrangler deploy` comme commande de déploiement. Créer D1/R2, remplacer l’ID D1 factice, ajouter les secrets dans les paramètres du Worker et appliquer toutes les migrations distantes.
 3. Configurer le domaine API et les variables d’origine/callback exactement, puis redéployer. Tester `/api/health` et conserver le résultat; une réponse saine doit confirmer D1, R2 et secrets.
 4. Dans l’application publiée, saisir l’URL HTTPS de l’API, créer l’espace administrateur avec la clé d’initialisation, puis vérifier connexion, changement de mot de passe, quota, média et programmation sans publier publiquement.
@@ -76,6 +77,6 @@ Cette version couvre la publication texte/image vers Instagram professionnel, Pa
 
 Dans le backend, `FRONTEND_ORIGIN` doit être l’origine exacte du site (schéma + domaine, sans chemin ni barre oblique finale), par exemple `https://app.klirline.com`. `PUBLIC_BASE_URL` doit être l’origine HTTPS exacte de l’API. Pour que la session par cookie fonctionne de façon fiable, configurez de préférence frontend et API sous le même domaine de premier niveau, par exemple `app.klirline.com` et `api.klirline.com`. Des domaines séparés comme `workers.dev` et `pages.dev` peuvent être bloqués comme cookies tiers par certains navigateurs.
 
-Les pages statiques sont servies par Cloudflare Pages. Le backend Express de référence, son stockage JSON et son worker ne peuvent pas être déployés tels quels comme Worker Cloudflare. Configurez l’URL API vers le Worker de `cloudflare-api/`, pas vers le site Pages lui-même.
+Les fichiers statiques sont servis par le Worker `klirline-social-publisher`. Le backend Express de référence, son stockage JSON et son worker ne peuvent pas être déployés tels quels comme Worker Cloudflare. Configurez l’URL API vers le Worker de `cloudflare-api/`, pas vers le Worker frontend.
 
 Ne jamais committer `.env`, jetons OAuth, secrets JWT/chiffrement, clés d'applications ni données de comptes. Les secrets de production doivent être configurés dans le tableau de bord de la plateforme.

@@ -33,7 +33,7 @@ if (!migrations.length) fail("Aucune migration D1 trouvée.");
 else console.log(`Migrations détectées: ${migrations.join(", ")}`);
 warn("Créer et vérifier les identifiants OAuth, domaines/callbacks et accès des comptes sociaux dans les consoles fournisseur.");
 warn("Déployer d'abord l'API Worker depuis la racine cloudflare-api avec « npx wrangler deploy », puis appliquer les migrations D1 distantes.");
-warn("Le site statique doit rester sur Cloudflare Pages avec la racine du dépôt, build vide et sortie « . »; ne pas lancer « npx wrangler preview » pour le site.");
+warn("Le Worker frontend doit utiliser la racine du dépôt, « npm run build » comme build et « npm run deploy » comme déploiement de production; ne pas utiliser « wrangler preview » en production.");
 
 for (const { level, message } of findings) console.log(`${level === "BLOCK" ? "❌" : "➡️"} ${level}: ${message}`);
 const blockers = findings.filter(({ level }) => level === "BLOCK");

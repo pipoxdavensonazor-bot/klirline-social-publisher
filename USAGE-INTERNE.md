@@ -30,7 +30,7 @@ Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000
 
 ## Mise en service et exploitation
 
-- Publier le site statique avec Cloudflare Pages et déployer l’API séparément depuis `cloudflare-api/`.
+- Publier le frontend avec Workers Static Assets à la racine du dépôt et déployer l’API séparément depuis `cloudflare-api/`.
 - Configurer D1/R2, les secrets, les origines HTTPS, les callbacks OAuth et le domaine d’API; conserver l’inscription publique désactivée.
 - Vérifier `/api/health`, les connexions, le téléversement d’image, une publication de test contrôlée, une programmation/annulation et le traitement Cron avant usage opérationnel.
 - Mettre en place des sauvegardes D1, une vérification de restauration, alertes de disponibilité, un responsable support interne et les procédures de suppression/révocation.

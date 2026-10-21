@@ -13,6 +13,7 @@ klirline-social-backend/uploads/
 node_modules/
 klirline-social-backend/node_modules/
 dist/
+/site/
 .wrangler/
 
 # OS/editor files

@@ -10,7 +10,7 @@ Le pilote Cloudflare couvre les publications texte/image vers Instagram professi
 
 ## Démarrer le prototype
 
-Ouvrir `index.html` dans un navigateur pour utiliser la préparation locale. Pour installer le pilote Workers, suivre [`CLOUDFLARE-DEPLOIEMENT.md`](CLOUDFLARE-DEPLOIEMENT.md); l’API se trouve dans [`cloudflare-api/`](cloudflare-api/). Le backend Node de référence est décrit dans [`klirline-social-backend/README.md`](klirline-social-backend/README.md).
+Ouvrir `index.html` dans un navigateur pour utiliser la préparation locale. Le frontend Worker Static Assets se construit avec `npm run build` et `npm run deploy`; son `wrangler.jsonc` sert uniquement la liste publique de `site/`. Pour installer l’API Worker distincte, suivre [`CLOUDFLARE-DEPLOIEMENT.md`](CLOUDFLARE-DEPLOIEMENT.md); son code se trouve dans [`cloudflare-api/`](cloudflare-api/). Le backend Node de référence est décrit dans [`klirline-social-backend/README.md`](klirline-social-backend/README.md).
 
 ## Plan d’usage et informations à compléter
 
