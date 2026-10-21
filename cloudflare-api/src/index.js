@@ -7,6 +7,7 @@ const PROVIDERS = {
 };
 const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"];
 const REQUIRED_SCHEMA_TABLES = ["users", "oauth_states", "connections", "media", "posts", "scheduled_posts", "scheduled_results", "organizations", "usage_counters", "auth_limits", "team_invitations", "audit_events", "campaign_drafts"];
+const DEFAULT_MAX_ACCOUNTS = 9;
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const COOKIE = "klirline_session";
@@ -141,7 +142,7 @@ async function workspaceUsage(db, user, env) {
     db.prepare("SELECT publication_count FROM usage_counters WHERE org_id=? AND period_key=?").bind(user.org_id, period).first(),
     db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id IN (SELECT id FROM users WHERE org_id=?)").bind(user.org_id).first()
   ]);
-  return { periodStart: period, publications: usage?.publication_count || 0, publicationLimit: planLimit(env, "PLAN_MONTHLY_POST_LIMIT", 5000), connectedAccounts: accounts?.count || 0, connectedAccountLimit: planLimit(env, "PLAN_MAX_ACCOUNTS", 9) };
+  return { periodStart: period, publications: usage?.publication_count || 0, publicationLimit: planLimit(env, "PLAN_MONTHLY_POST_LIMIT", 5000), connectedAccounts: accounts?.count || 0, connectedAccountLimit: planLimit(env, "PLAN_MAX_ACCOUNTS", DEFAULT_MAX_ACCOUNTS) };
 }
 async function sealToken(value, env) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -235,7 +236,7 @@ async function oauthStart(provider, user, env, db) {
   const current = await db.prepare("SELECT id FROM connections WHERE provider=? AND user_id IN (SELECT id FROM users WHERE org_id=?) LIMIT 1").bind(provider, user.org_id).first();
   if (!current) {
     const count = await db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id IN (SELECT id FROM users WHERE org_id=?)").bind(user.org_id).first();
-    if (count?.count >= planLimit(env, "PLAN_MAX_ACCOUNTS", 3)) throw httpError("connected-account-limit-reached", 429);
+    if (count?.count >= planLimit(env, "PLAN_MAX_ACCOUNTS", DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached", 429);
   }
   const cfg = providerEnv(provider, env);
   if (!cfg.id || !cfg.secret || !cfg.redirect || !env.FRONTEND_ORIGIN || !env.PUBLIC_BASE_URL) throw httpError("missing-credentials", 503);

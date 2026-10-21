@@ -301,6 +301,21 @@ test("health endpoint reports missing production bindings and secrets", async ()
   assert.equal((await publicModeHealth.json()).checks.internalMode,false);
 });
 
+test("OAuth fallback account cap matches the nine-account workspace limit", async () => {
+  const ctx = fixture({ PLAN_MAX_ACCOUNTS: "invalid" });
+  const cookie = await bootstrap(ctx);
+  const usage = await (await ctx.request("/api/usage", "GET", null, { Cookie: cookie })).json();
+  assert.equal(usage.usage.connectedAccountLimit, 9);
+  const userId = ctx.sqlite.prepare("SELECT id FROM users WHERE email=?").get("owner@klirline.ca").id;
+  for (let i = 0; i < 4; i++) {
+    ctx.sqlite.prepare("INSERT INTO connections(id,user_id,provider,account_id,account_label,token_ciphertext,token_iv,created_at) VALUES(?,?,?,?,?,?,?,?)")
+      .run(`connection-${i}`, userId, `existing-${i}`, `account-${i}`, `Account ${i}`, "ciphertext", "iv", new Date().toISOString());
+  }
+  const start = await ctx.request("/oauth/instagram/start", "GET", null, { Cookie: cookie });
+  assert.equal(start.status, 503);
+  assert.equal((await start.json()).error, "missing-credentials");
+});
+
 test("LinkedIn OAuth verifies access to the configured organization", async () => {
   const ctx = fixture({ PLAN_MAX_ACCOUNTS: "1" });
   const adminCookie = await bootstrap(ctx);
