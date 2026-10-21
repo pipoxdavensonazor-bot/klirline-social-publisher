@@ -246,7 +246,17 @@ async function processStripeEvent(request, env, db) {
     const subscriptionItem = (object.items?.data || []).find((item) => Number.isInteger(item.current_period_start) && Number.isInteger(item.current_period_end));
     const periodStart = subscriptionItem ? new Date(subscriptionItem.current_period_start * 1000).toISOString() : null;
     const periodEnd = subscriptionItem ? new Date(subscriptionItem.current_period_end * 1000).toISOString() : null;
-    if (orgId && status) statements.push(db.prepare("UPDATE organizations SET billing_status=?,stripe_customer_id=COALESCE(?,stripe_customer_id),stripe_subscription_id=?,billing_period_start=COALESCE(?,billing_period_start),billing_period_end=COALESCE(?,billing_period_end) WHERE id=?").bind(status, customerId || null, object.id || null, periodStart, periodEnd, orgId));
+    if (orgId && status) {
+      const eventCreated = Number.isSafeInteger(event.created) && event.created > 0 ? event.created : 0;
+      statements.push(db.prepare(`UPDATE organizations SET
+        billing_status=CASE WHEN ? >= billing_event_created THEN ? ELSE billing_status END,
+        stripe_customer_id=COALESCE(?,stripe_customer_id),
+        stripe_subscription_id=COALESCE(stripe_subscription_id,?),
+        billing_period_start=CASE WHEN ? >= billing_event_created THEN COALESCE(?,billing_period_start) ELSE billing_period_start END,
+        billing_period_end=CASE WHEN ? >= billing_event_created THEN COALESCE(?,billing_period_end) ELSE billing_period_end END,
+        billing_event_created=MAX(billing_event_created,?) WHERE id=?`)
+        .bind(eventCreated,status,customerId||null,object.id||null,eventCreated,periodStart,eventCreated,periodEnd,eventCreated,orgId));
+    }
   }
   statements.push(db.prepare("INSERT INTO stripe_events(id,processed_at) VALUES(?,?)").bind(event.id, nowIso()));
   try { await db.batch(statements); }
@@ -712,9 +722,10 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/auth/logout" && request.method === "POST") return json({ok:true},200,secureHeaders({...cors,"Set-Cookie":clearCookie()}));
   if (url.pathname === "/api/billing" && request.method === "GET") {
     const user = await authenticate(request, env, env.DB);
-    const org = await env.DB.prepare("SELECT billing_status,stripe_customer_id,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
+    const org = await env.DB.prepare("SELECT billing_status,billing_period_end,stripe_customer_id,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
     const usage = await billingUsage(env.DB, user, env);
-    return json({ status: org?.billing_status || "inactive", canPublish: ["active", "trialing"].includes(org?.billing_status), customerPortalAvailable: Boolean(org?.stripe_customer_id), usage }, 200, secureHeaders(cors));
+    const expired = org?.billing_status === "active" && org.billing_period_end && Date.parse(org.billing_period_end) <= Date.now();
+    return json({ status: expired ? "expired" : org?.billing_status || "inactive", canPublish: ["active", "trialing"].includes(org?.billing_status) && !expired, customerPortalAvailable: Boolean(org?.stripe_customer_id), usage }, 200, secureHeaders(cors));
   }
   if (url.pathname === "/api/billing/checkout" && request.method === "POST") {
     const user = await authenticate(request, env, env.DB, ["admin"]);

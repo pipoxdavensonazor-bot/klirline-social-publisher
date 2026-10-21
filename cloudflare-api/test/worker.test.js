@@ -7,7 +7,7 @@ import worker from "../src/index.js";
 function fixture(overrides = {}) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
-  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql", "0005_plan_usage_limits.sql"]) {
+  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql", "0005_plan_usage_limits.sql", "0006_stripe_event_order.sql"]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
   class Statement {
@@ -186,7 +186,7 @@ test("subscription signup stays gated until a verified Stripe subscription is ac
     assert.equal(inactiveSchedule.status, 402);
 
     const nowSeconds = Math.floor(Date.now() / 1000);
-    const event = { id: "evt_subscription_created", type: "customer.subscription.created", data: { object: { id: "sub_example", customer: "cus_example", status: "active", metadata: { organization_id: signedUp.user.org }, items: { data: [{ current_period_start: nowSeconds, current_period_end: nowSeconds + 30 * 86400 }] } } } };
+    const event = { id: "evt_subscription_created", created: nowSeconds, type: "customer.subscription.created", data: { object: { id: "sub_example", customer: "cus_example", status: "active", metadata: { organization_id: signedUp.user.org }, items: { data: [{ current_period_start: nowSeconds, current_period_end: nowSeconds + 30 * 86400 }] } } } };
     async function sendStripeEvent(value) {
       const raw = JSON.stringify(value); const timestamp = Math.floor(Date.now() / 1000);
       const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(ctx.env.STRIPE_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -202,6 +202,11 @@ test("subscription signup stays gated until a verified Stripe subscription is ac
     const activated = await sendStripeEvent(event);
     assert.equal(activated.status, 200);
     assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, true);
+    ctx.sqlite.prepare("UPDATE organizations SET billing_period_end=? WHERE id=?").run(new Date(Date.now() - 1000).toISOString(), signedUp.user.org);
+    const expiredBilling = await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json());
+    assert.equal(expiredBilling.status, "expired");
+    assert.equal(expiredBilling.canPublish, false);
+    ctx.sqlite.prepare("UPDATE organizations SET billing_period_end=? WHERE id=?").run(new Date(Date.now() + 30 * 86400000).toISOString(), signedUp.user.org);
     const scheduleBody = { text: "Hello", targets: ["facebook"], runAtUTC: new Date(Date.now() + 120000).toISOString() };
     const scheduled = await ctx.request("/api/scheduled", "POST", scheduleBody, { Cookie: cookie, "Idempotency-Key": "schedule-one" });
     assert.equal(scheduled.status, 200);
@@ -226,6 +231,9 @@ test("subscription signup stays gated until a verified Stripe subscription is ac
     assert.deepEqual(await duplicate.json(), { received: true, duplicate: true });
     const canceled = await sendStripeEvent({ ...event, id: "evt_subscription_canceled", type: "customer.subscription.deleted" });
     assert.equal(canceled.status, 200);
+    assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, false);
+    const staleUpdate = await sendStripeEvent({ ...event, id: "evt_subscription_stale_update", created: nowSeconds - 60, type: "customer.subscription.updated" });
+    assert.equal(staleUpdate.status, 200);
     assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, false);
     const deleted = await ctx.request("/api/account", "DELETE", { password: "a-secure-password-123" }, { Cookie: cookie });
     assert.equal(deleted.status, 200);
