@@ -6,6 +6,7 @@ const PROVIDERS = {
   bluesky: { name: "Bluesky", limit: 300 }, tiktok: { name: "TikTok", limit: 2200 }, twitch: { name: "Twitch", limit: 500 }
 };
 const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"];
+const REQUIRED_SCHEMA_TABLES = ["users", "oauth_states", "connections", "media", "posts", "scheduled_posts", "scheduled_results", "organizations", "usage_counters", "auth_limits", "team_invitations", "audit_events", "campaign_drafts"];
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const COOKIE = "klirline_session";
@@ -648,11 +649,17 @@ async function handle(request, env, ctx) {
     return new Response(object.body, { headers: secureHeaders({ ...cors, "Content-Type": row.mime, "Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff" }) });
   }
   if (url.pathname === "/api/health" && request.method === "GET") {
-    let database = false; let mediaStorage = false;
+    let database = false; let databaseSchema = false; let mediaStorage = false;
     try { database = Boolean(await env.DB?.prepare("SELECT 1 AS ready").first()); } catch {}
+    try {
+      const placeholders = REQUIRED_SCHEMA_TABLES.map(() => "?").join(",");
+      const schema = await env.DB?.prepare(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN (${placeholders})`).bind(...REQUIRED_SCHEMA_TABLES).first();
+      databaseSchema = schema?.count === REQUIRED_SCHEMA_TABLES.length;
+    } catch {}
     try { if (env.MEDIA?.head) { await env.MEDIA.head("__klirline_healthcheck__"); mediaStorage = true; } } catch {}
     const checks = {
       database,
+      databaseSchema,
       mediaStorage,
       internalMode: env.INTERNAL_MODE === "true",
       sessionSecret: typeof env.SESSION_SECRET === "string" && env.SESSION_SECRET.length >= 32,

@@ -284,6 +284,11 @@ test("internal team invitations create shared workspace readers and allow access
 test("health endpoint reports missing production bindings and secrets", async () => {
   const healthy = fixture();
   assert.equal((await healthy.request("/api/health")).status, 200);
+  const missingMigration = fixture();
+  missingMigration.sqlite.exec("DROP TABLE campaign_drafts");
+  const migrationResponse = await missingMigration.request("/api/health");
+  assert.equal(migrationResponse.status, 503);
+  assert.equal((await migrationResponse.json()).checks.databaseSchema, false);
   const missingR2 = fixture({ MEDIA: null });
   const response = await missingR2.request("/api/health");
   assert.equal(response.status, 503);
