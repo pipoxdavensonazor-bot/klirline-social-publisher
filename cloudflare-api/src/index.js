@@ -504,7 +504,8 @@ async function accountPublish(request, user, env, db) {
     }
   }
   const idem = String(request.headers.get("Idempotency-Key") || "").slice(0, 128) || null;
-  const fingerprint = idem ? await requestFingerprint(user.id, "publish", { text, targets: [...targets].sort(), mediaId: body.mediaId || null }) : null;
+  const draftId = String(body.draftId || "").trim() || null;
+  const fingerprint = idem ? await requestFingerprint(user.id, "publish", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, draftId }) : null;
   if (idem) {
     const prior = await db.prepare("SELECT id,results_json,request_fingerprint FROM posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first();
     if (prior) {
@@ -517,6 +518,7 @@ async function accountPublish(request, user, env, db) {
       return { results: priorResults, postId: prior.id, deduped: true };
     }
   }
+  const approvedDraft = await requireApprovedDraft(db,user,env,draftId,text,targets,body.mediaId || null);
   let media = null;
   if (body.mediaId) {
     media = await getMedia(db, body.mediaId, user.id);
@@ -524,10 +526,14 @@ async function accountPublish(request, user, env, db) {
     media = await loadMedia(media, env);
     if (!media) throw httpError("media-file-missing", 404);
   }
-  const usagePeriod = await reserveMonthlyPublication(db, user, env); const id = randomId();
+  if (approvedDraft) await claimApprovedDraft(db,user,approvedDraft.id,"publishing");
+  let usagePeriod;
+  try { usagePeriod=await reserveMonthlyPublication(db,user,env); }
+  catch(error) { if(approvedDraft)await releaseApprovedDraft(db,user.org_id,approvedDraft.id,"publishing"); throw error; }
+  const id = randomId();
   if (idem) {
-    try { await db.prepare("INSERT INTO posts(id,user_id,idempotency_key,text,media_id,results_json,created_at,request_fingerprint,usage_period) VALUES(?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,"[]",nowIso(),fingerprint,usagePeriod).run(); }
-    catch { await releaseMonthlyPublication(db,user.org_id,usagePeriod); const prior = await db.prepare("SELECT id,results_json,request_fingerprint FROM posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); const priorResults=JSON.parse(prior.results_json||"[]"); return {results:priorResults.length?priorResults:targets.map((provider)=>({provider,status:"action-required",message:"prior-attempt-status-unknown-check-network-before-retry"})),postId:prior.id,deduped:true}; } throw httpError("publish-idempotency-conflict", 409); }
+    try { await db.prepare("INSERT INTO posts(id,user_id,idempotency_key,text,media_id,results_json,created_at,request_fingerprint,usage_period,campaign_draft_id) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,"[]",nowIso(),fingerprint,usagePeriod,approvedDraft?.id||null).run(); }
+    catch { await releaseMonthlyPublication(db,user.org_id,usagePeriod); if(approvedDraft)await releaseApprovedDraft(db,user.org_id,approvedDraft.id,"publishing"); const prior = await db.prepare("SELECT id,results_json,request_fingerprint FROM posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); const priorResults=JSON.parse(prior.results_json||"[]"); return {results:priorResults.length?priorResults:targets.map((provider)=>({provider,status:"action-required",message:"prior-attempt-status-unknown-check-network-before-retry"})),postId:prior.id,deduped:true}; } throw httpError("publish-idempotency-conflict", 409); }
   }
   const results = await Promise.all(targets.map(async (provider) => {
     const connection = await getConnection(db, user.id, provider);
@@ -535,9 +541,10 @@ async function accountPublish(request, user, env, db) {
   }));
   if (idem) await db.prepare("UPDATE posts SET results_json=? WHERE id=?").bind(JSON.stringify(results), id).run();
   else {
-    try { await db.prepare("INSERT INTO posts(id,user_id,text,media_id,results_json,created_at,usage_period) VALUES(?,?,?,?,?,?,?)").bind(id,user.id,text,body.mediaId || null,JSON.stringify(results),nowIso(),usagePeriod).run(); }
-    catch (error) { await releaseMonthlyPublication(db,user.org_id,usagePeriod); throw error; }
+    try { await db.prepare("INSERT INTO posts(id,user_id,text,media_id,results_json,created_at,usage_period,campaign_draft_id) VALUES(?,?,?,?,?,?,?,?)").bind(id,user.id,text,body.mediaId || null,JSON.stringify(results),nowIso(),usagePeriod,approvedDraft?.id||null).run(); }
+    catch (error) { await releaseMonthlyPublication(db,user.org_id,usagePeriod); if(approvedDraft)await releaseApprovedDraft(db,user.org_id,approvedDraft.id,"publishing"); throw error; }
   }
+  if (approvedDraft) await finishApprovedDraft(db,user.org_id,approvedDraft.id,results.every((result)=>result.status==="published")?"published":"needs_action");
   return { results, postId: id };
 }
 async function createSchedule(request, user, env, db) {
@@ -554,23 +561,50 @@ async function createSchedule(request, user, env, db) {
     if (runAt.getTime() >= new Date(media.expires_at).getTime() - 3 * 60 * 60 * 1000) throw httpError("scheduled-media-expires-too-soon");
   }
   const idem = String(request.headers.get("Idempotency-Key") || "").slice(0, 128) || null;
-  const fingerprint = idem ? await requestFingerprint(user.id, "schedule", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, runAtUTC: runAt.toISOString(), timezone }) : null;
+  const draftId = String(body.draftId || "").trim() || null;
+  const fingerprint = idem ? await requestFingerprint(user.id, "schedule", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, runAtUTC: runAt.toISOString(), timezone, draftId }) : null;
   if (idem) { const prior = await db.prepare("SELECT * FROM scheduled_posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); return { job: await scheduleView(db, prior), deduped: true }; } }
-  const usagePeriod = await reserveMonthlyPublication(db, user, env); const id = randomId(); const created = nowIso();
+  const approvedDraft = await requireApprovedDraft(db,user,env,draftId,text,targets,body.mediaId || null);
+  if (approvedDraft) await claimApprovedDraft(db,user,approvedDraft.id,"scheduled");
+  let usagePeriod;
   try {
-    const statements = [db.prepare("INSERT INTO scheduled_posts(id,user_id,idempotency_key,text,media_id,targets_json,status,run_at,created_at,request_fingerprint,usage_period,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,JSON.stringify(targets),"queued",runAt.toISOString(),created,fingerprint,usagePeriod,timezone)];
+    usagePeriod=await reserveMonthlyPublication(db,user,env);
+    const id = randomId(); const created = nowIso();
+    const statements = [db.prepare("INSERT INTO scheduled_posts(id,user_id,idempotency_key,text,media_id,targets_json,status,run_at,created_at,request_fingerprint,usage_period,timezone,campaign_draft_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,JSON.stringify(targets),"queued",runAt.toISOString(),created,fingerprint,usagePeriod,timezone,approvedDraft?.id||null)];
     for (const provider of targets) statements.push(db.prepare("INSERT INTO scheduled_results(job_id,provider,status,attempts,next_run_at) VALUES(?,?,?,?,?)").bind(id,provider,"queued",0,runAt.toISOString()));
     await db.batch(statements);
+    return { job: { id, runAtUTC: runAt.toISOString(), timezone, status: "queued", targets }, deduped: false };
   } catch (error) {
-    await releaseMonthlyPublication(db,user.org_id,usagePeriod);
+    if (usagePeriod) await releaseMonthlyPublication(db,user.org_id,usagePeriod);
+    if (approvedDraft) await releaseApprovedDraft(db,user.org_id,approvedDraft.id,"scheduled");
     if (idem) { const prior = await db.prepare("SELECT * FROM scheduled_posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); return { job: await scheduleView(db, prior), deduped: true }; } }
     throw error;
   }
-  return { job: { id, runAtUTC: runAt.toISOString(), timezone, status: "queued", targets }, deduped: false };
+}
+
+async function requireApprovedDraft(db,user,env,draftId,text,targets,mediaId) {
+  if (env.REQUIRE_APPROVED_DRAFTS !== "true") return null;
+  if (!draftId) throw httpError("approved-campaign-draft-required",409);
+  const draft=await db.prepare("SELECT id,text,targets_json,media_id,review_status,publication_state FROM campaign_drafts WHERE id=? AND org_id=?").bind(draftId,user.org_id).first();
+  if (!draft) throw httpError("approved-campaign-draft-not-found",404);
+  if (draft.review_status !== "approved" || draft.publication_state !== "not_published") throw httpError("approved-campaign-draft-not-ready",409);
+  const approvedTargets=JSON.parse(draft.targets_json||"[]").sort();
+  if (draft.text !== text || JSON.stringify(approvedTargets) !== JSON.stringify([...targets].sort()) || (draft.media_id||null) !== (mediaId||null)) throw httpError("approved-campaign-content-mismatch",409);
+  return draft;
+}
+async function claimApprovedDraft(db,user,draftId,state) {
+  const result=await db.prepare("UPDATE campaign_drafts SET publication_state=? WHERE id=? AND org_id=? AND review_status='approved' AND publication_state='not_published'").bind(state,draftId,user.org_id).run();
+  if (!result.meta?.changes) throw httpError("approved-campaign-draft-already-claimed",409);
+}
+async function releaseApprovedDraft(db,orgId,draftId,state) {
+  await db.prepare("UPDATE campaign_drafts SET publication_state='not_published' WHERE id=? AND org_id=? AND publication_state=?").bind(draftId,orgId,state).run();
+}
+async function finishApprovedDraft(db,orgId,draftId,state) {
+  await db.prepare("UPDATE campaign_drafts SET publication_state=?,review_status=CASE WHEN ?='needs_action' THEN 'draft' ELSE review_status END WHERE id=? AND org_id=? AND publication_state='publishing'").bind(state,state,draftId,orgId).run();
 }
 async function scheduleView(db, row) {
   const result = await db.prepare("SELECT provider,status,attempts,result_json FROM scheduled_results WHERE job_id=? ORDER BY provider").bind(row.id).all();
-  return { id: row.id, authorId: row.user_id, text: row.text, mediaId: row.media_id, targets: JSON.parse(row.targets_json), status: row.status, runAtUTC: row.run_at, timezone: row.timezone || "UTC", createdAt: row.created_at, results: (result.results || []).filter((r) => r.result_json).map((r) => JSON.parse(r.result_json)) };
+  return { id: row.id, authorId: row.user_id, text: row.text, mediaId: row.media_id, campaignDraftId:row.campaign_draft_id||null, targets: JSON.parse(row.targets_json), status: row.status, runAtUTC: row.run_at, timezone: row.timezone || "UTC", createdAt: row.created_at, results: (result.results || []).filter((r) => r.result_json).map((r) => JSON.parse(r.result_json)) };
 }
 async function processDue(env, db) {
   const now = nowIso();
@@ -601,6 +635,7 @@ async function processDue(env, db) {
     const status = queued ? "queued" : states.some((s) => s.status === "failed") ? "failed" : states.some((s) => s.status === "action-required") ? "action-required" : "published";
     const nextAt = states.find((s) => s.status === "queued")?.next_run;
     await db.prepare("UPDATE scheduled_posts SET status=?,run_at=COALESCE(?,run_at),lease_until=NULL WHERE id=? AND status='processing'").bind(status, nextAt ?? null, job.id).run();
+    if (job.campaign_draft_id && !queued) await db.prepare("UPDATE campaign_drafts SET publication_state=?,review_status=CASE WHEN ?='needs_action' THEN 'draft' ELSE review_status END WHERE id=? AND publication_state='scheduled'").bind(status==="published"?"published":"needs_action",status==="published"?"published":"needs_action",job.campaign_draft_id).run();
     const owner = await db.prepare("SELECT org_id FROM users WHERE id=?").bind(job.user_id).first();
     if (owner) {
       const results = await db.prepare("SELECT provider,status FROM scheduled_results WHERE job_id=? ORDER BY provider").bind(job.id).all();
@@ -609,6 +644,7 @@ async function processDue(env, db) {
   }
   const expired = await db.prepare("SELECT id,object_key FROM media WHERE expires_at<=?").bind(now).all();
   await db.prepare("UPDATE scheduled_posts SET status='action-required',lease_until=NULL WHERE status='queued' AND media_id IN (SELECT id FROM media WHERE expires_at<=?)").bind(now).run();
+  await db.prepare("UPDATE campaign_drafts SET publication_state='needs_action',review_status='draft' WHERE publication_state='scheduled' AND id IN (SELECT campaign_draft_id FROM scheduled_posts WHERE status='action-required' AND media_id IN (SELECT id FROM media WHERE expires_at<=?))").bind(now).run();
   await db.prepare(`UPDATE scheduled_results SET status='action-required',result_json='{"status":"action-required","message":"scheduled-media-expired"}'
     WHERE status='queued' AND job_id IN (SELECT id FROM scheduled_posts WHERE status='action-required' AND media_id IN (SELECT id FROM media WHERE expires_at<=?))`).bind(now).run();
   for (const item of expired.results || []) await env.MEDIA.delete(item.object_key);
@@ -621,7 +657,7 @@ async function processDue(env, db) {
 function campaignDraftView(row) {
   return { id:row.id, authorId:row.author_user_id, updatedById:row.updated_by_user_id, title:row.title, text:row.text, mediaId:row.media_id,
     targets:JSON.parse(row.targets_json), countryCode:row.country_code, languageTag:row.language_tag, timezone:row.timezone,
-    reviewStatus:row.review_status, reviewNote:row.review_note, createdAt:row.created_at, updatedAt:row.updated_at };
+    reviewStatus:row.review_status, reviewNote:row.review_note, publicationState:row.publication_state||"not_published", createdAt:row.created_at, updatedAt:row.updated_at };
 }
 function campaignDraftInput(body) {
   const title=String(body.title||"").trim(); const text=String(body.text||"").trim();
@@ -678,7 +714,7 @@ async function handle(request, env, ctx) {
   }
   if (url.pathname === "/api/public-config" && request.method === "GET") {
     const internalMode = env.INTERNAL_MODE === "true";
-    return json({ internalMode, publicSignupEnabled: false }, 200, secureHeaders(cors));
+    return json({ internalMode, publicSignupEnabled: false, requireApprovedDrafts:env.REQUIRE_APPROVED_DRAFTS==="true" }, 200, secureHeaders(cors));
   }
   if (url.pathname === "/api/providers" && request.method === "GET") return json(providerList(env), 200, secureHeaders(cors));
   if (url.pathname === "/api/auth/bootstrap" && request.method === "GET") { const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first(); return json({ needsAdmin: !row?.count }, 200, secureHeaders(cors)); }
@@ -849,17 +885,18 @@ async function handle(request, env, ctx) {
   if (url.pathname.startsWith("/api/drafts/") && url.pathname.endsWith("/review") && request.method === "POST") {
     const user=await authenticate(request,env,env.DB,["admin"]); requireInternalWorkspace(env); const id=decodeURIComponent(url.pathname.split("/").at(-2)); const body=await readJson(request); const decision=String(body.decision||""); const note=String(body.note||"").trim();
     if (!["approved","rejected"].includes(decision) || (decision==="rejected"&&!note) || note.length>1000) throw httpError("invalid-review-decision");
-    const result=await env.DB.prepare("UPDATE campaign_drafts SET review_status=?,review_note=?,updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=? AND review_status='in_review'").bind(decision,note,user.id,nowIso(),id,user.org_id).run();
+    const result=await env.DB.prepare("UPDATE campaign_drafts SET review_status=?,review_note=?,updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=? AND review_status='in_review' AND publication_state IN ('not_published','needs_action')").bind(decision,note,user.id,nowIso(),id,user.org_id).run();
     if (!result.meta?.changes) { const found=await env.DB.prepare("SELECT id FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).first(); if(!found) throw httpError("not-found",404); throw httpError("draft-not-in-review",409); }
     await auditEvent(env.DB,user.org_id,user.id,`campaign.draft.${decision}`,id,{noteLength:note.length});
     return json(campaignDraftView(await env.DB.prepare("SELECT * FROM campaign_drafts WHERE id=?").bind(id).first()),200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/drafts/") && request.method === "PUT") {
     const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const data=campaignDraftInput(await readJson(request));
-    const before=await env.DB.prepare("SELECT review_status FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).first(); if(!before) throw httpError("not-found",404);
+    const before=await env.DB.prepare("SELECT review_status,publication_state FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).first(); if(!before) throw httpError("not-found",404);
+    if(["scheduled","publishing"].includes(before.publication_state)) throw httpError("campaign-draft-publication-in-progress",409);
     const status="draft";
     if(data.mediaId && !await env.DB.prepare("SELECT m.id FROM media m JOIN users owner ON owner.id=m.user_id WHERE m.id=? AND owner.org_id=? AND m.expires_at>?").bind(data.mediaId,user.org_id,nowIso()).first()) throw httpError("media-not-found",404);
-    await env.DB.prepare("UPDATE campaign_drafts SET title=?,text=?,targets_json=?,country_code=?,language_tag=?,timezone=?,media_id=?,review_status=?,review_note='',updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=?")
+    await env.DB.prepare("UPDATE campaign_drafts SET title=?,text=?,targets_json=?,country_code=?,language_tag=?,timezone=?,media_id=?,review_status=?,review_note='',publication_state='not_published',updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=?")
       .bind(data.title,data.text,JSON.stringify(data.targets),data.countryCode,data.languageTag,data.timezone,data.mediaId,status,user.id,nowIso(),id,user.org_id).run();
     await auditEvent(env.DB,user.org_id,user.id,"campaign.draft.updated",id,{countryCode:data.countryCode,languageTag:data.languageTag});
     return json(campaignDraftView(await env.DB.prepare("SELECT * FROM campaign_drafts WHERE id=?").bind(id).first()),200,secureHeaders(cors));
@@ -868,13 +905,14 @@ async function handle(request, env, ctx) {
     const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const body=await readJson(request);
     if(body.action!=="submit-review"&&body.action!=="withdraw-review") throw httpError("invalid-draft-action");
     const next=body.action==="submit-review"?"in_review":"draft";
-    const result=await env.DB.prepare("UPDATE campaign_drafts SET review_status=?,review_note='',updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=? AND (review_status IN ('draft','rejected') OR (?='draft' AND review_status='in_review'))").bind(next,user.id,nowIso(),id,user.org_id,next).run();
+    const result=await env.DB.prepare("UPDATE campaign_drafts SET review_status=?,review_note='',publication_state='not_published',updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=? AND publication_state IN ('not_published','needs_action') AND (review_status IN ('draft','rejected') OR (?='draft' AND review_status='in_review'))").bind(next,user.id,nowIso(),id,user.org_id,next).run();
     if(!result.meta?.changes){const found=await env.DB.prepare("SELECT id FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).first();if(!found)throw httpError("not-found",404);throw httpError("draft-state-conflict",409);}
     await auditEvent(env.DB,user.org_id,user.id,`campaign.draft.${next}`,id);
     return json(campaignDraftView(await env.DB.prepare("SELECT * FROM campaign_drafts WHERE id=?").bind(id).first()),200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/drafts/") && request.method === "DELETE") {
     const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const id=decodeURIComponent(url.pathname.split("/").at(-1));
+    const draft=await env.DB.prepare("SELECT publication_state FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).first(); if(!draft)throw httpError("not-found",404); if(["scheduled","publishing"].includes(draft.publication_state))throw httpError("campaign-draft-publication-in-progress",409);
     const result=await env.DB.prepare("DELETE FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).run(); if(!result.meta?.changes)throw httpError("not-found",404);
     await auditEvent(env.DB,user.org_id,user.id,"campaign.draft.deleted",id); return json({id,deleted:true},200,secureHeaders(cors));
   }
@@ -895,9 +933,10 @@ async function handle(request, env, ctx) {
     return json(await Promise.all((rows.results||[]).map((row)=>scheduleView(env.DB,row))),200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/scheduled/") && request.method === "DELETE") {
-    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const orgUsers="user_id IN (SELECT id FROM users WHERE org_id=?)"; const before=await env.DB.prepare(`SELECT usage_period FROM scheduled_posts WHERE id=? AND ${orgUsers} AND status='queued'`).bind(id,user.org_id).first(); const result=await env.DB.prepare(`UPDATE scheduled_posts SET status='canceled' WHERE id=? AND ${orgUsers} AND status='queued'`).bind(id,user.org_id).run();
+    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const orgUsers="user_id IN (SELECT id FROM users WHERE org_id=?)"; const before=await env.DB.prepare(`SELECT usage_period,campaign_draft_id FROM scheduled_posts WHERE id=? AND ${orgUsers} AND status='queued'`).bind(id,user.org_id).first(); const result=await env.DB.prepare(`UPDATE scheduled_posts SET status='canceled' WHERE id=? AND ${orgUsers} AND status='queued'`).bind(id,user.org_id).run();
     if (!result.meta?.changes) { const found=await env.DB.prepare(`SELECT status FROM scheduled_posts WHERE id=? AND ${orgUsers}`).bind(id,user.org_id).first(); if (!found) throw httpError("not-found",404); return json({id,status:found.status},200,secureHeaders(cors)); }
     if (before?.usage_period) await releaseMonthlyPublication(env.DB,user.org_id,before.usage_period);
+    if (before?.campaign_draft_id) await releaseApprovedDraft(env.DB,user.org_id,before.campaign_draft_id,"scheduled");
     await auditEvent(env.DB,user.org_id,user.id,"publication.schedule-canceled",id);
     return json({id,status:"canceled"},200,secureHeaders(cors));
   }

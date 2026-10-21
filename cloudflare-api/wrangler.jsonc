@@ -34,6 +34,7 @@
     "META_APP_ID": "",
     "ALLOW_PUBLIC_SIGNUP": "false",
     "INTERNAL_MODE": "true",
+    "REQUIRE_APPROVED_DRAFTS": "true",
     "PLAN_MAX_ACCOUNTS": "9",
     "PLAN_MONTHLY_POST_LIMIT": "5000",
     "INSTAGRAM_REDIRECT_URI": "https://api.klirline.com/oauth/instagram/callback",

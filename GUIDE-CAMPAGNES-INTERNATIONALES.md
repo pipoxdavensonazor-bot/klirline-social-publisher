@@ -23,7 +23,7 @@ Le code de ces intégrations ne prouve pas qu’un compte réel est connecté ni
 ## Gouvernance de l’équipe
 
 - L’administrateur garde les connexions OAuth et invite chaque membre avec son propre compte et le rôle minimal nécessaire.
-- Les brouillons peuvent être partagés et envoyés en relecture. La relecture n’est pas encore une barrière technique à la publication directe; pour une campagne sensible, exiger l’approbation du responsable dans le processus d’équipe avant l’envoi.
+- Les brouillons sont partagés et envoyés en relecture. En mode interne, toute publication API et programmation automatique doit utiliser le contenu exact d’un brouillon approuvé par un administrateur. Si l’envoi échoue ou nécessite une action, corrigez le brouillon et envoyez-le de nouveau en relecture. Les destinations en mode manuel restent confirmées directement sur le réseau.
 - Retirer rapidement l’accès d’un membre qui quitte l’équipe et révoquer son consentement dans chaque réseau social.
 - Ne jamais demander ni enregistrer un mot de passe de réseau social.
 

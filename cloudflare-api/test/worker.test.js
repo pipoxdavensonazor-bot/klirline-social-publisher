@@ -220,6 +220,38 @@ test("shared campaign drafts enforce workspace visibility and approval roles", a
   assert.ok(audit.some(event=>event.type==="campaign.draft.rejected"));
 });
 
+test("approved campaign drafts gate automatic publishing and scheduling", async () => {
+  const ctx=fixture({REQUIRE_APPROVED_DRAFTS:"true"}); const cookie=await bootstrap(ctx);
+  const create=async(text)=>{
+    const response=await ctx.request("/api/drafts","POST",{title:"Campagne approuvée",text,targets:["facebook"],countryCode:"CA",languageTag:"fr-CA",timezone:"America/Toronto"},{Cookie:cookie});
+    assert.equal(response.status,201); const draft=await response.json();
+    assert.equal((await ctx.request(`/api/drafts/${draft.id}`,"POST",{action:"submit-review"},{Cookie:cookie})).status,200);
+    const approved=await ctx.request(`/api/drafts/${draft.id}/review`,"POST",{decision:"approved"},{Cookie:cookie});
+    assert.equal(approved.status,200); return draft.id;
+  };
+  const publishDraft=await create("Texte approuvé pour publication");
+  const missing=await ctx.request("/api/publish","POST",{text:"Texte approuvé pour publication",targets:["facebook"]},{Cookie:cookie,"Idempotency-Key":"approved-missing"});
+  assert.equal(missing.status,409); assert.equal((await missing.json()).error,"approved-campaign-draft-required");
+  const mismatch=await ctx.request("/api/publish","POST",{text:"Texte modifié",targets:["facebook"],draftId:publishDraft},{Cookie:cookie,"Idempotency-Key":"approved-mismatch"});
+  assert.equal(mismatch.status,409); assert.equal((await mismatch.json()).error,"approved-campaign-content-mismatch");
+  const published=await ctx.request("/api/publish","POST",{text:"Texte approuvé pour publication",targets:["facebook"],draftId:publishDraft},{Cookie:cookie,"Idempotency-Key":"approved-publish"});
+  assert.equal(published.status,200); assert.equal((await published.json()).results[0].status,"action-required");
+  const replay=await ctx.request("/api/publish","POST",{text:"Texte approuvé pour publication",targets:["facebook"],draftId:publishDraft},{Cookie:cookie,"Idempotency-Key":"approved-publish"});
+  assert.equal((await replay.json()).deduped,true);
+  const reused=await ctx.request("/api/publish","POST",{text:"Texte approuvé pour publication",targets:["facebook"],draftId:publishDraft},{Cookie:cookie,"Idempotency-Key":"approved-publish-again"});
+  assert.equal(reused.status,409); assert.equal((await reused.json()).error,"approved-campaign-draft-not-ready");
+  const scheduleDraft=await create("Texte approuvé pour programmation");
+  const schedulePayload={text:"Texte approuvé pour programmation",targets:["facebook"],draftId:scheduleDraft,runAtUTC:new Date(Date.now()+120000).toISOString(),timezone:"America/Toronto"};
+  const scheduled=await ctx.request("/api/scheduled","POST",schedulePayload,{Cookie:cookie,"Idempotency-Key":"approved-schedule"});
+  assert.equal(scheduled.status,200); const job=(await scheduled.json()).job;
+  const inProgress=await ctx.request(`/api/drafts/${scheduleDraft}`,"PUT",{text:"Modification",targets:["facebook"]},{Cookie:cookie});
+  assert.equal(inProgress.status,409);
+  const canceled=await ctx.request(`/api/scheduled/${job.id}`,"DELETE",null,{Cookie:cookie});
+  assert.equal((await canceled.json()).status,"canceled");
+  const reusedAfterCancel=await ctx.request("/api/scheduled","POST",schedulePayload,{Cookie:cookie,"Idempotency-Key":"approved-schedule-new"});
+  assert.equal(reusedAfterCancel.status,200);
+});
+
 test("internal team invitations create shared workspace readers and allow access revocation", async () => {
   const ctx = fixture({ INTERNAL_MODE: "true" });
   const adminCookie = await bootstrap(ctx);
