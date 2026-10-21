@@ -1,8 +1,9 @@
 # Klirline Social — backend de référence (Node 20+, stockage JSON local)
 
-Fournit les routes de connexion et de publication de référence. Ce serveur reste une version pilote
-mono-instance; il ne doit pas être exposé à des clients payants avant migration du stockage et revue
-des intégrations. L’interface racine sait maintenant appeler ces routes quand l’URL API est configurée.
+Fournit un ancien prototype de routes de connexion et de publication, conservé pour référence. Ce
+serveur mono-instance et son stockage JSON ne sont pas le backend de l’outil interne à déployer;
+l’API Cloudflare de `../cloudflare-api/` est la cible de travail. L’interface racine peut encore
+appeler ce serveur si une URL est configurée pour des essais locaux uniquement.
 
 ## Lancer en local
 1. Depuis ce dossier : `npm install`
@@ -62,19 +63,19 @@ des intégrations. L’interface racine sait maintenant appeler ces routes quand
   screencast, compte test, URLs confidentialité/suppression (les pages statiques du frontend doivent être publiées et finalisées).
 - LinkedIn : produit Community Management, `w_organization_social`, admin Page approbateur.
 - X : budget/quotas verifies avant de batir.
-- TikTok : audit obligatoire (sinon posts prives), `video.publish`.
+- TikTok : pas d’adaptateur dans l’outil interne; préparation et publication manuelles uniquement.
 - Pinterest : `pins:write` + `boards:read`, redirect exacte, tableau choisi par Pin.
 - Twitch : scope selon l action retenue (`clips:edit`), contraintes stream/VOD.
 - Bluesky : OAuth AT Protocol sur le PDS, pas de mot de passe partage.
 
 ## Pages légales (revues + callbacks)
-`GET /api/legal/privacy|terms|deletion` (FR). Les pages publiques statiques `privacy.html`, `terms.html` et `deletion.html` sont aussi publiées à la racine du frontend et liées depuis la barre latérale. Ce sont des brouillons : compléter l’identité légale, les contacts, les durées réelles, les prix et les autres champs indiqués avant de les utiliser comme URL officielles dans les consoles développeur ou de vendre le service.
+`GET /api/legal/privacy|terms|deletion` (FR). Ces routes appartiennent à l’ancien backend de référence. Pour les revues de plateforme, utiliser les pages statiques actuelles de la racine et vérifier qu’elles reflètent les pratiques réellement déployées, les coordonnées, les données et durées de conservation. Aucun prix ni parcours de vente n’est prévu.
 
 ## Limites actuelles
 
 - Le `index.html` peut appeler le backend configuré pour OAuth Instagram/LinkedIn/Facebook, téléverser une image et demander une publication ou programmation. C’est un pilote; les chemins doivent encore être validés avec de vrais comptes développeur et comptes sociaux. Le mode local manuel reste disponible.
 - Le stockage JSON et le worker conviennent uniquement à une démonstration mono-instance.
-- Le backend Express ne se déploie pas tel quel dans un Worker Cloudflare. Le stockage JSON et le worker doivent être remplacés avant tout usage payant.
+- Le backend Express et son stockage JSON ne sont pas la cible de production interne; utiliser le Worker Cloudflare distinct.
 - La révocation distante d’un consentement OAuth n’est pas automatisée; l’utilisateur doit retirer Klirline dans les paramètres du réseau.
 - Le nom légal de l’exploitant et l’adresse de confidentialité doivent être renseignés avant la production.
 - Les pages légales statiques contiennent des champs à compléter et portent `noindex`; ne pas les considérer comme des politiques validées ni les soumettre comme pages officielles avant finalisation.

@@ -1,4 +1,4 @@
-// Utilisateurs Klirline + roles, separes des futurs clients.
+// Utilisateurs et rôles de l’équipe Klirline.
 // JWT court (12 h) dans Authorization: Bearer. Mot de passe : scrypt (stdlib).
 import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
 import jwt from "jsonwebtoken";

@@ -15,7 +15,7 @@ export const LEGAL = {
   terms: {
     title: "Conditions d utilisation",
     body: [
-      "Usage prevu : Klirline interne d abord. L ouverture a des clients exige une app publique par fournisseur (revues).",
+      "Usage prevu : outil interne reserve aux membres autorises de l equipe Klirline. Aucune inscription publique ni facturation.",
       "Interdit : partager des mots de passe, automatiser les navigateurs contre les CGU des plateformes, publier sur un compte sans consentement OAuth du proprietaire.",
       "Limites : quotas et regles de chaque plateforme (X, TikTok audit, LinkedIn approbation…) s appliquent.",
       "Twitch : clips/annonces/gestion de chaine uniquement — pas de cross-post generique.",
