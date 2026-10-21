@@ -11,6 +11,7 @@
 - Désactiver un membre révoque ses sessions sans supprimer les campagnes qu’il a créées. Pour le réactiver, l’administrateur utilise le contrôle Réactiver; l’ancien mot de passe reste le sien et une nouvelle connexion est nécessaire.
 - Ne collectez jamais les mots de passe des réseaux sociaux. Utilisez les autorisations OAuth officielles et retirez l’accès des personnes qui quittent l’équipe.
 - Gardez séparés l’environnement de test et les comptes sociaux réels. Protégez les secrets, limitez les administrateurs et vérifiez les journaux de déploiement.
+- Consultez le journal d’activité dans Préférences après les invitations, changements d’accès, connexions sociales, publications et programmations; il conserve les 100 événements les plus récents sans enregistrer le texte des publications.
 
 ## Fonctionnalités actuellement disponibles
 
@@ -24,7 +25,7 @@ Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000
 2. Faire relire le texte traduit par une personne compétente; vérifier les promesses de service, prix, conditions et exigences locales avant publication.
 3. Adapter le format au réseau et au pays; sélectionner uniquement les comptes officiels autorisés.
 4. Pour les campagnes sensibles, demander l’approbation d’un responsable Klirline avant programmation. Cette approbation reste un processus d’équipe externe à l’application pour le moment.
-5. Programmer en tenant compte du fuseau horaire du public ciblé; noter l’heure locale dans le plan de campagne et vérifier le rendu UTC affiché par l’outil.
+5. Choisir le fuseau horaire IANA du public ciblé dans l’éditeur et vérifier l’heure affichée dans le calendrier; la programmation est conservée en UTC et porte son fuseau de destination.
 6. Après envoi, contrôler l’état et l’URL de chaque publication directement dans le réseau. Traiter les échecs, doublons possibles, quotas et demandes de reconnexion.
 
 ## Mise en service et exploitation
@@ -37,8 +38,8 @@ Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000
 
 ## Écarts à traiter avant un usage régulier par toute l’équipe
 
-- Ajouter un journal d’audit consultable pour les publications, changements de rôles, invitations et connexions sociales.
+- Configurer et appliquer la migration 0009 avant le déploiement de la nouvelle version pour activer le journal d’audit consultable.
 - Partager aussi les brouillons de texte au niveau de l’espace; ils restent pour l’instant locaux au navigateur où ils ont été créés.
-- Ajouter les campagnes multilingues, pays/cibles, fuseaux horaires explicites et un circuit d’approbation interne.
+- Ajouter les campagnes multilingues et les pays/cibles liés; chaque programmation conserve déjà son fuseau IANA, mais le calendrier et l’approbation ne gèrent pas encore plusieurs fuseaux/campagnes comme un workflow complet.
 - Valider les accès et publier de vrais essais contrôlés sur chaque réseau que Klirline prévoit d’utiliser; les liens de profil seuls ne donnent aucun droit de publication.
 - Choisir les réseaux prioritaires pays par pays, en fonction des comptes officiels, permissions et politiques régionales réellement disponibles.

@@ -1,18 +1,38 @@
 # Revue et recherche : connexions sociales Klirline
-
-**Date de vérification : 20 octobre 2026**  
-**Objectif :** connecter les neuf profils Klirline fournis, choisir les destinations et publier depuis une seule interface.
-
+**Date de vérification initiale : 20 octobre 2026**
+**Objectif actuel :** outil interne Klirline pour préparer et diffuser les promotions de l’entreprise, sans vente d’abonnement.
+## Addendum — état du dépôt au 21 octobre 2026
+La revue initiale ci-dessous décrivait le prototype avant l’ajout du Worker Cloudflare. Elle ne décrit plus l’état courant à elle seule.
+| Niveau | État vérifié dans le dépôt | Ce que cela signifie |
+|---|---|---|
+| Interface sans serveur | Les neuf profils peuvent être ajoutés comme liens dans le navigateur | Cela prépare une publication manuelle; le lien ne connecte pas le compte et l’application ne peut pas publier sur la seule base de l’URL. |
+| Worker Cloudflare | Connexion OAuth et publication texte/image codées pour Instagram professionnel, Page Facebook et Page LinkedIn | Le code est couvert par des réponses fournisseur simulées; aucun vrai compte ou environnement Cloudflare n’a été validé. |
+| Équipe interne | Administrateur, invitations à usage unique, rôles rédacteur/lecteur, révocation des accès et ressources d’espace partagées | Les brouillons et médias du mode sans serveur restent locaux. |
+| Exploitation | Migrations 0009–0010, journal des actions d’équipe, programmation avec fuseau IANA, publication, annulation et résultat du worker | Déployer les migrations et configurer les sauvegardes/alertes avant de considérer le journal opérationnel. |
+| Réseaux hors pilote | X, Threads, Pinterest, Bluesky et TikTok ont un nom dans l’interface, mais pas un adaptateur de publication actif dans le Worker. Twitch n’est pas un canal de publication générique. | Ne pas annoncer ces connexions comme disponibles; créer un adaptateur distinct après la validation des accès développeur. |
+Le Worker reste un pilote de code. Le prévol local signale un blocage réel: l’identifiant D1 est factice. Les domaines, secrets OAuth, permissions fournisseur, migration distante, domaine HTTPS, déploiement et consentements des comptes restent à établir. Le quota interne de 5 000 publications/mois ne constitue pas un quota garanti par les plateformes.
+### Réévaluation des plateformes
+- **Instagram / Facebook:** conserver le périmètre API actuel, mais confirmer qu’Instagram est un compte professionnel et que le compte Facebook de production est bien une Page autorisée. Une URL `/profile.php?id=…` ou `/people/…` seule ne prouve pas que la destination est une Page. Une Page, les rôles/permissions Meta et une app approuvée sont nécessaires pour publier via l’API officielle.
+- **LinkedIn:** le code actuel vérifie uniquement un administrateur approuvé de l’organisation et sait envoyer texte/image. Les documents courants mentionnent aussi des rôles de Page autorisés pour `w_organization_social`, mais l’accès Community Management, les scopes accordés et le statut de l’organisation doivent être approuvés par LinkedIn. Le versionnement Marketing évolue; le code actuel utilise `202610` et doit être revérifié avant déploiement.
+- **X:** ajout possible avec OAuth utilisateur, mais il faut un projet/app autorisé et vérifier les prix/quotas actuels dans le compte développeur avant d’allouer un budget. L’adaptateur n’est pas implémenté dans le Worker.
+- **Threads:** publication officielle documentée en plusieurs étapes (créer un conteneur puis publier) et scope `threads_content_publish`; l’adaptateur et son traitement de statut ne sont pas présents dans le Worker.
+- **Pinterest:** API v5 permet des Pins image/vidéo, mais l’app doit être enregistrée et approuvée; l’accès Trial limite la visibilité des Pins au créateur. Un board doit être choisi et les scopes `boards:read`, `boards:write`, `pins:read`, `pins:write` dépendent du parcours.
+- **Bluesky:** les posts sont des enregistrements AT Protocol `app.bsky.feed.post`. Il existe une voie technique, mais le client OAuth AT Protocol conforme et l’adaptateur n’existent pas ici. Ne pas demander le mot de passe principal; ne pas adopter les App Passwords sans décision et revue de sécurité.
+- **TikTok:** Content Posting API gère Direct Post et le flux de brouillon. `video.publish`, accès de l’app, requête d’informations du créateur, domaine de média vérifié et audit sont requis. Les clients non audités publient avec une visibilité restreinte au propriétaire; cette voie ne peut donc pas être déclarée prête à diffuser publiquement.
+- **Twitch:** l’API propose des actions de chaîne et des clips liés au direct/VOD, pas un fil de posts promotionnels génériques. À traiter comme un outil distinct de création/annonce de clips, si Klirline confirme ce besoin.
+### Source supplémentaire vérifiée
+- LinkedIn Posts API et rôles requis: <https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api>
+- LinkedIn Community Management tiers/revue: <https://learn.microsoft.com/en-us/linkedin/marketing/community-management/community-management-api-migration-guide>
+- Pinterest création de Pins: <https://developers.pinterest.com/docs/work-with-organic-content-and-users/create-boards-and-pins/>; niveaux d’accès: <https://developers.pinterest.com/docs/key-concepts/access-tiers/>
+- Threads API officiel Meta sur Postman: <https://www.postman.com/meta/threads/documentation/dht3nzz/threads-api>
+- Bluesky création d’un post: <https://docs.bsky.app/docs/tutorials/creating-a-post>
+- TikTok Direct Post et audit: <https://developers.tiktok.com/docs/en/content-posting-api-get-started>
+- Twitch API clips et scope: <https://dev.twitch.tv/docs/api/clips/>
 ## Conclusion
-
 Le produit souhaité est faisable pour plusieurs réseaux, mais les liens publics fournis ne suffisent pas à connecter les comptes. Chaque plateforme doit confirmer que le propriétaire du compte autorise l’application à agir. L’expérience peut rester simple pour Klirline : bouton **Connecter**, connexion chez le réseau, écran de consentement, retour dans l’application. La partie technique utilise tout de même OAuth et les API officielles en arrière-plan.
-
 Il ne faut pas demander ni stocker les mots de passe des réseaux. Il ne faut pas non plus automatiser le navigateur connecté pour contourner les règles des plateformes : ce mécanisme est fragile et peut compromettre les comptes. Le frontend actuel est un prototype local, pas encore une application OAuth.
-
 ## Revue de l’application actuelle
-
 Le projet contient une page statique `index.html`. Elle sert à présenter l’éditeur, mais ne réalise aucune connexion d’identité.
-
 | Constat | Effet actuel | Travail nécessaire |
 |---|---|---|
 | Cinq réseaux seulement dans l’interface | Threads, Pinterest, Bluesky et Twitch manquent | Ajouter les neuf intégrations et leurs états propres |
@@ -22,11 +42,8 @@ Le projet contient une page statique `index.html`. Elle sert à présenter l’�
 | La programmation ajoute une entrée locale datée de demain | Rien ne s’exécute à l’heure indiquée | Ajouter une base de données et un ordonnanceur serveur/queue |
 | Le média est seulement affiché dans l’aperçu du navigateur | Le fichier n’est pas envoyé aux réseaux; une URL locale n’est pas accessible par leurs serveurs | Stockage objet privé/public contrôlé, conversions et upload selon les exigences de chaque API |
 | Tout le code est dans le navigateur et s’ouvre par `file://` | Pas de domaine HTTPS, callback OAuth, secrets ou traitement serveur | Héberger l’application sur HTTPS et ajouter une API backend |
-
 ## Capacités par profil fourni
-
 Les URL de profils ne permettent pas de déduire le type interne du compte, les rôles d’administrateur, les limites publicitaires ou le consentement déjà accordé. Le tableau ci-dessous indique la voie documentée et les contrôles à faire lors de la connexion.
-
 | Réseau et profil | Publication officielle | Préconditions / vérifications | Priorité proposée |
 |---|---|---|---|
 | **Instagram** — `@klirlineofficial` | Oui. API Instagram avec connexion Instagram ou connexion Facebook; publication de médias prise en charge. | Le compte doit être **Professionnel** (Business ou Creator). Selon le flux, utiliser le login Instagram Business et la permission de publication Instagram (`instagram_business_content_publish`), ou relier un compte professionnel à une Page Facebook et obtenir les permissions Page/Instagram requises. Vérifier le type de compte et le jeton au retour OAuth. | P1 |
@@ -38,17 +55,11 @@ Les URL de profils ne permettent pas de déduire le type interne du compte, les 
 | **Bluesky** — `klirlineofficial.bsky.social` | Oui. AT Protocol permet de créer un record `app.bsky.feed.post`; les médias nécessitent l’envoi de blobs et leur intégration dans le record. | Préférer OAuth AT Protocol aux mots de passe. L’authentification et l’écriture se font sur le PDS de l’utilisateur. Prévoir la gestion des handles/DID, sessions, expiration et consentement; si une méthode de transition par mot de passe d’application est évaluée, la traiter comme secret et demander une validation explicite de sécurité avant de l’adopter. | P2 — bon candidat pour prototype technique |
 | **TikTok** — `@klirlineofficial` | Oui via Content Posting API, pour vidéo et désormais photo. | App TikTok Developer, produit Content Posting, OAuth, scope `video.publish`, approbation de la portée et consentement du créateur. Les comptes et réglages de confidentialité disponibles doivent être affichés à l’utilisateur. Le média servi par URL exige un domaine/URL préalablement vérifié; sinon utiliser l’upload fichier. **Sans audit de l’app, les posts API restent privés** : l’audit est donc un préalable au lancement public. | P2/P3 — app review/audit obligatoire pour visibilité publique |
 | **Twitch** — `twitch.tv/klirlineofficial` | Pas d’équivalent à un fil de posts sociaux génériques dans l’API consultée. Twitch API couvre plutôt l’identité, les streams, le chat, les annonces, les clips et les vidéos. | Décider ce que « publier sur Twitch » signifie : créer un clip d’un live (scope `clips:edit` et contraintes de stream/VOD), envoyer une annonce dans le chat (pas une publication de promotion sur le profil), ou gérer la chaîne/stream. Il faut OAuth utilisateur pour les actions de chaîne, enregistrer l’app/redirect, valider les jetons. | P3 — fonctionnalité spécifique Twitch, pas un cross-post générique |
-
 **Résultat réaliste :** huit destinations peuvent être étudiées pour une forme de publication sociale, sous réserve des types de compte et examens d’app. Twitch est différent : il ne faut pas le présenter comme un neuvième canal de publication universel. Le Facebook `/people/` est le principal point bloquant à clarifier.
-
 ## Ce que signifie « sans API » dans le parcours utilisateur
-
 Si l’objectif est que Klirline n’ait pas à créer de jetons ou à copier des clés, c’est possible : l’application peut gérer l’inscription développeur et l’OAuth en coulisses, puis l’utilisateur clique **Connecter**, se connecte directement chez Meta/X/LinkedIn/etc. et accorde des permissions précises.
-
 Si « sans API » signifie qu’aucun appel API ni mécanisme officiel n’est utilisé, alors une publication automatique multi-réseaux n’est pas possible. Un lien de profil n’est pas une autorisation de publication. L’alternative sans API est un assistant manuel : copier le texte, ouvrir chaque site, ajouter le média et cliquer Publier sur chaque plateforme.
-
 ## Architecture minimale pour la version réelle
-
 1. **Déployer une web app HTTPS** avec domaine stable, page confidentialité, conditions, suppression des données et URLs de callback OAuth.
 2. **Ajouter comptes utilisateurs et permissions** pour séparer Klirline des futurs clients, même si le premier usage est mono-entreprise.
 3. **Créer une intégration par fournisseur** avec bouton OAuth, `state` anti-CSRF, scopes minimaux et retour qui vérifie le compte/organisation obtenu.
@@ -58,9 +69,7 @@ Si « sans API » signifie qu’aucun appel API ni mécanisme officiel n’est u
 7. **Programmation réelle** : persister la date en UTC, traiter avec une queue serveur, gérer les fuseaux, jetons expirés, modifications, annulations et idempotence pour ne pas poster deux fois.
 8. **App review et conformité** : descriptions d’usage, screencast/compte de test si demandé, politique de confidentialité, instructions de suppression et revue fournisseur. Les accès/permissions précis varient avec le mode développement/production et la catégorie d’app.
 9. **Interface** : connecter/déconnecter chaque compte, montrer le nom obtenu par OAuth, choisir les cibles (Page/organisation/board), indiquer les capacités médias par réseau, proposer adaptation de texte et confirmer le résultat après chaque envoi.
-
 ## Informations Klirline à confirmer avant de coder les connexions
-
 - Instagram : compte Professionnel ou personnel? Business ou Creator? Une Page Facebook est-elle déjà liée si le flux Meta choisi l’exige?
 - Facebook : la destination est-elle bien un profil personnel ou existe-t-il une Page d’entreprise Klirline? Qui a le contrôle complet de cette Page?
 - LinkedIn : qui est administrateur de la page entreprise et peut approuver l’accès de l’application?
@@ -70,9 +79,7 @@ Si « sans API » signifie qu’aucun appel API ni mécanisme officiel n’est u
 - Programmation : publication immédiate seulement ou date/heure, fuseau horaire et calendrier?
 - Twitch : voulez-vous publier des clips, envoyer des annonces de chat ou simplement afficher le lien de la chaîne?
 - X : confirmer qu’un budget/API tierce est accepté après consultation des conditions actuellement offertes dans Developer Console.
-
 ## Sources officielles consultées
-
 - Instagram API de Meta (workspace documentaire officiel) : https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api
 - Instagram API avec connexion Instagram, permissions et publication : https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api?entity=request-23987686-894be833-d0b6-4877-859e-c61ae6474d64
 - Threads API officiel Meta (OAuth, permissions, publication) : https://www.postman.com/meta/threads/documentation/dht3nzz/threads-api
@@ -89,4 +96,3 @@ Si « sans API » signifie qu’aucun appel API ni mécanisme officiel n’est u
 - Twitch API reference (actions réellement proposées) : https://dev.twitch.tv/docs/api/reference
 - Twitch authentication and OAuth : https://dev.twitch.tv/docs/authentication
 - Twitch create clips : https://dev.twitch.tv/docs/api/clips/
-

@@ -17,6 +17,11 @@ const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/
 const randomId = (size = 24) => b64u(crypto.getRandomValues(new Uint8Array(size)));
 const nowIso = () => new Date().toISOString();
 const httpError = (message, status = 400) => Object.assign(new Error(message), { status });
+async function auditEvent(db, orgId, actorId, type, targetId = null, details = {}) {
+  const safeDetails = JSON.stringify(details).slice(0, 2000);
+  await db.prepare("INSERT INTO audit_events(id,org_id,actor_user_id,event_type,target_id,details_json,created_at) VALUES(?,?,?,?,?,?,?)")
+    .bind(randomId(), orgId, actorId || null, type, targetId, safeDetails, nowIso()).run();
+}
 
 function allowedOrigins(env) { return String(env.FRONTEND_ORIGIN || "").split(",").map((x) => x.trim()).filter(Boolean); }
 function corsHeaders(request, env) {
@@ -291,6 +296,8 @@ async function completeOAuth(request, env, db) {
   await db.prepare(`INSERT INTO connections(id,user_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,expires_at,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET id=excluded.id,account_id=excluded.account_id,account_label=excluded.account_label,account_json=excluded.account_json,scopes_json=excluded.scopes_json,token_ciphertext=excluded.token_ciphertext,token_iv=excluded.token_iv,expires_at=excluded.expires_at,created_at=excluded.created_at`)
     .bind(id, record.user_id, provider, String(account.id), account.label, JSON.stringify(account), JSON.stringify(PROVIDERS[provider].scopes), sealed.data, sealed.iv, token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null, nowIso()).run();
+  const owner = await db.prepare("SELECT org_id FROM users WHERE id=?").bind(record.user_id).first();
+  if (owner) await auditEvent(db,owner.org_id,record.user_id,"social.connected",provider,{accountLabel:account.label});
   return provider;
 }
 async function getConnection(db, userId, provider) {
@@ -444,6 +451,8 @@ async function createSchedule(request, user, env, db) {
   const body = await readJson(request); const text = String(body.text || "").trim(); const targets = requestedTargets(body.targets);
   const runAt = new Date(body.runAtUTC);
   if (!text || !targets.length || !body.runAtUTC || !Number.isFinite(runAt.getTime()) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(body.runAtUTC) || runAt.getTime() < Date.now() + 60000) throw httpError("text-targets-future-runAtUTC-required");
+  const timezone = String(body.timezone || "UTC").trim();
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(runAt); } catch { throw httpError("invalid-time-zone"); }
   for (const provider of targets) { if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`); if (["instagram"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`); }
   if (body.mediaId) {
     const media = await getMedia(db, body.mediaId, user.id);
@@ -452,11 +461,11 @@ async function createSchedule(request, user, env, db) {
     if (runAt.getTime() >= new Date(media.expires_at).getTime() - 3 * 60 * 60 * 1000) throw httpError("scheduled-media-expires-too-soon");
   }
   const idem = String(request.headers.get("Idempotency-Key") || "").slice(0, 128) || null;
-  const fingerprint = idem ? await requestFingerprint(user.id, "schedule", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, runAtUTC: runAt.toISOString() }) : null;
+  const fingerprint = idem ? await requestFingerprint(user.id, "schedule", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, runAtUTC: runAt.toISOString(), timezone }) : null;
   if (idem) { const prior = await db.prepare("SELECT * FROM scheduled_posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); return { job: await scheduleView(db, prior), deduped: true }; } }
   const usagePeriod = await reserveMonthlyPublication(db, user, env); const id = randomId(); const created = nowIso();
   try {
-    const statements = [db.prepare("INSERT INTO scheduled_posts(id,user_id,idempotency_key,text,media_id,targets_json,status,run_at,created_at,request_fingerprint,usage_period) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,JSON.stringify(targets),"queued",runAt.toISOString(),created,fingerprint,usagePeriod)];
+    const statements = [db.prepare("INSERT INTO scheduled_posts(id,user_id,idempotency_key,text,media_id,targets_json,status,run_at,created_at,request_fingerprint,usage_period,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,JSON.stringify(targets),"queued",runAt.toISOString(),created,fingerprint,usagePeriod,timezone)];
     for (const provider of targets) statements.push(db.prepare("INSERT INTO scheduled_results(job_id,provider,status,attempts,next_run_at) VALUES(?,?,?,?,?)").bind(id,provider,"queued",0,runAt.toISOString()));
     await db.batch(statements);
   } catch (error) {
@@ -464,11 +473,11 @@ async function createSchedule(request, user, env, db) {
     if (idem) { const prior = await db.prepare("SELECT * FROM scheduled_posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); return { job: await scheduleView(db, prior), deduped: true }; } }
     throw error;
   }
-  return { job: { id, runAtUTC: runAt.toISOString(), status: "queued", targets }, deduped: false };
+  return { job: { id, runAtUTC: runAt.toISOString(), timezone, status: "queued", targets }, deduped: false };
 }
 async function scheduleView(db, row) {
   const result = await db.prepare("SELECT provider,status,attempts,result_json FROM scheduled_results WHERE job_id=? ORDER BY provider").bind(row.id).all();
-  return { id: row.id, authorId: row.user_id, text: row.text, mediaId: row.media_id, targets: JSON.parse(row.targets_json), status: row.status, runAtUTC: row.run_at, createdAt: row.created_at, results: (result.results || []).filter((r) => r.result_json).map((r) => JSON.parse(r.result_json)) };
+  return { id: row.id, authorId: row.user_id, text: row.text, mediaId: row.media_id, targets: JSON.parse(row.targets_json), status: row.status, runAtUTC: row.run_at, timezone: row.timezone || "UTC", createdAt: row.created_at, results: (result.results || []).filter((r) => r.result_json).map((r) => JSON.parse(r.result_json)) };
 }
 async function processDue(env, db) {
   const now = nowIso();
@@ -499,6 +508,11 @@ async function processDue(env, db) {
     const status = queued ? "queued" : states.some((s) => s.status === "failed") ? "failed" : states.some((s) => s.status === "action-required") ? "action-required" : "published";
     const nextAt = states.find((s) => s.status === "queued")?.next_run;
     await db.prepare("UPDATE scheduled_posts SET status=?,run_at=COALESCE(?,run_at),lease_until=NULL WHERE id=? AND status='processing'").bind(status, nextAt ?? null, job.id).run();
+    const owner = await db.prepare("SELECT org_id FROM users WHERE id=?").bind(job.user_id).first();
+    if (owner) {
+      const results = await db.prepare("SELECT provider,status FROM scheduled_results WHERE job_id=? ORDER BY provider").bind(job.id).all();
+      await auditEvent(db,owner.org_id,job.user_id,"publication.schedule.processed",job.id,{status,results:results.results||[]});
+    }
   }
   const expired = await db.prepare("SELECT id,object_key FROM media WHERE expires_at<=?").bind(now).all();
   await db.prepare("UPDATE scheduled_posts SET status='action-required',lease_until=NULL WHERE status='queued' AND media_id IN (SELECT id FROM media WHERE expires_at<=?)").bind(now).run();
@@ -528,6 +542,7 @@ async function handle(request, env, ctx) {
     const checks = {
       database,
       mediaStorage,
+      internalMode: env.INTERNAL_MODE === "true",
       sessionSecret: typeof env.SESSION_SECRET === "string" && env.SESSION_SECRET.length >= 32,
       tokenEncryptionKey: /^[0-9a-f]{64}$/i.test(String(env.TOKENS_ENCRYPTION_KEY_HEX || ""))
     };
@@ -580,6 +595,12 @@ async function handle(request, env, ctx) {
     const rows = await env.DB.prepare("SELECT id,email,role,is_active,created_at FROM users WHERE org_id=? ORDER BY created_at,email").bind(user.org_id).all();
     return json((rows.results||[]).map((row)=>({id:row.id,email:row.email,role:row.role,active:row.is_active===1,createdAt:row.created_at})),200,secureHeaders(cors));
   }
+  if (url.pathname === "/api/audit" && request.method === "GET") {
+    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    const user = await authenticate(request,env,env.DB,["admin"]);
+    const rows = await env.DB.prepare("SELECT e.id,e.actor_user_id,u.email AS actor_email,e.event_type,e.target_id,e.details_json,e.created_at FROM audit_events e LEFT JOIN users u ON u.id=e.actor_user_id WHERE e.org_id=? ORDER BY e.created_at DESC LIMIT 100").bind(user.org_id).all();
+    return json((rows.results||[]).map((row)=>({id:row.id,actorId:row.actor_user_id,actorEmail:row.actor_email||"Compte supprimé",type:row.event_type,targetId:row.target_id,details:JSON.parse(row.details_json||"{}"),createdAt:row.created_at})),200,secureHeaders(cors));
+  }
   if (url.pathname === "/api/team/invitations" && request.method === "GET") {
     if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
     const user = await authenticate(request,env,env.DB,["admin"]);
@@ -597,6 +618,7 @@ async function handle(request, env, ctx) {
     const token = randomId(32); const tokenHash = b64u(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(token)));
     const id = randomId(); const createdAt = nowIso(); const expiresAt = new Date(Date.now()+48*60*60*1000).toISOString();
     await env.DB.prepare("INSERT INTO team_invitations(id,org_id,email,role,token_hash,created_by,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,user.org_id,email,role,tokenHash,user.id,createdAt,expiresAt).run();
+    await auditEvent(env.DB,user.org_id,user.id,"team.invitation.created",id,{email,role});
     const inviteUrl = new URL(allowedOrigins(env)[0]); inviteUrl.searchParams.set("invite",token);
     return json({email,role,expiresAt,invitationUrl:inviteUrl.toString()},201,secureHeaders(cors));
   }
@@ -605,6 +627,7 @@ async function handle(request, env, ctx) {
     const user = await authenticate(request,env,env.DB,["admin"]); const id = decodeURIComponent(url.pathname.split("/").at(-1));
     const result = await env.DB.prepare("DELETE FROM team_invitations WHERE id=? AND org_id=? AND used_at IS NULL").bind(id,user.org_id).run();
     if (!result.meta?.changes) throw httpError("not-found",404);
+    await auditEvent(env.DB,user.org_id,user.id,"team.invitation.revoked",id);
     return json({id,revoked:true},200,secureHeaders(cors));
   }
   if (url.pathname === "/api/team/accept" && request.method === "POST") {
@@ -622,6 +645,7 @@ async function handle(request, env, ctx) {
     } catch { throw httpError("invitation-invalid-or-expired",400); }
     const createdUser = await env.DB.prepare("SELECT id,email,role,org_id,auth_version FROM users WHERE id=? AND is_active=1").bind(id).first();
     if (!createdUser) throw httpError("invitation-invalid-or-expired",400);
+    await auditEvent(env.DB,createdUser.org_id,createdUser.id,"team.invitation.accepted",id,{email:createdUser.email,role:createdUser.role});
     const session = await makeSession(createdUser,env);
     return json({user:userMetadata(createdUser)},201,secureHeaders({...cors,"Set-Cookie":sessionCookie(session)}));
   }
@@ -633,6 +657,7 @@ async function handle(request, env, ctx) {
     if (!target) throw httpError("not-found",404);
     if (target.role==="admin") throw httpError("cannot-disable-workspace-admin",409);
     await env.DB.prepare("UPDATE users SET is_active=0,auth_version=auth_version+1 WHERE id=? AND org_id=?").bind(id,user.org_id).run();
+    await auditEvent(env.DB,user.org_id,user.id,"team.member.disabled",id);
     return json({id,active:false},200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/team/") && url.pathname.endsWith("/activate") && request.method === "POST") {
@@ -642,6 +667,7 @@ async function handle(request, env, ctx) {
     if (!target) throw httpError("not-found",404);
     if (target.role==="admin") throw httpError("cannot-change-workspace-admin",409);
     await env.DB.prepare("UPDATE users SET is_active=1,auth_version=auth_version+1 WHERE id=? AND org_id=?").bind(id,user.org_id).run();
+    await auditEvent(env.DB,user.org_id,user.id,"team.member.enabled",id);
     return json({id,active:true},200,secureHeaders(cors));
   }
   if (url.pathname === "/api/usage" && request.method === "GET") {
@@ -662,7 +688,7 @@ async function handle(request, env, ctx) {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT p.* FROM posts p JOIN users author ON author.id=p.user_id WHERE author.org_id=? ORDER BY p.created_at DESC LIMIT 200").bind(user.org_id).all();
     return json((rows.results||[]).map((r)=>({id:r.id,authorId:r.user_id,text:r.text,mediaId:r.media_id,results:JSON.parse(r.results_json),createdAt:r.created_at})),200,secureHeaders(cors));
   }
-  if (url.pathname === "/api/publish" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); return json(await accountPublish(request,user,env,env.DB),200,secureHeaders(cors)); }
+  if (url.pathname === "/api/publish" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const result=await accountPublish(request,user,env,env.DB); await auditEvent(env.DB,user.org_id,user.id,"publication.sent",result.postId,{results:result.results.map(({provider,status})=>({provider,status}))}); return json(result,200,secureHeaders(cors)); }
   if (url.pathname === "/api/media" && request.method === "POST") {
     const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const form=await request.formData(); const file=form.get("file");
     if (!(file instanceof File)) throw httpError("no-file"); if (file.size > MAX_MEDIA_BYTES) throw httpError("file-too-large",413);
@@ -673,7 +699,7 @@ async function handle(request, env, ctx) {
     catch (error) { await env.MEDIA.delete(key); throw error; }
     return json({id,url:`${env.PUBLIC_BASE_URL}/media/${encodeURIComponent(id)}`,mime,size:bytes.byteLength},201,secureHeaders(cors));
   }
-  if (url.pathname === "/api/scheduled" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); return json(await createSchedule(request,user,env,env.DB),200,secureHeaders(cors)); }
+  if (url.pathname === "/api/scheduled" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const result=await createSchedule(request,user,env,env.DB); await auditEvent(env.DB,user.org_id,user.id,"publication.scheduled",result.job.id,{targets:result.job.targets,runAtUTC:result.job.runAtUTC,timezone:result.job.timezone}); return json(result,200,secureHeaders(cors)); }
   if (url.pathname === "/api/scheduled" && request.method === "GET") {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT s.* FROM scheduled_posts s JOIN users author ON author.id=s.user_id WHERE author.org_id=? ORDER BY s.run_at DESC LIMIT 200").bind(user.org_id).all();
     return json(await Promise.all((rows.results||[]).map((row)=>scheduleView(env.DB,row))),200,secureHeaders(cors));
@@ -682,11 +708,13 @@ async function handle(request, env, ctx) {
     const user=await authenticate(request,env,env.DB,["admin","redacteur"]); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const orgUsers="user_id IN (SELECT id FROM users WHERE org_id=?)"; const before=await env.DB.prepare(`SELECT usage_period FROM scheduled_posts WHERE id=? AND ${orgUsers} AND status='queued'`).bind(id,user.org_id).first(); const result=await env.DB.prepare(`UPDATE scheduled_posts SET status='canceled' WHERE id=? AND ${orgUsers} AND status='queued'`).bind(id,user.org_id).run();
     if (!result.meta?.changes) { const found=await env.DB.prepare(`SELECT status FROM scheduled_posts WHERE id=? AND ${orgUsers}`).bind(id,user.org_id).first(); if (!found) throw httpError("not-found",404); return json({id,status:found.status},200,secureHeaders(cors)); }
     if (before?.usage_period) await releaseMonthlyPublication(env.DB,user.org_id,before.usage_period);
+    await auditEvent(env.DB,user.org_id,user.id,"publication.schedule-canceled",id);
     return json({id,status:"canceled"},200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/connections/") && request.method === "DELETE") {
     const user=await authenticate(request,env,env.DB,["admin"]); const provider=decodeURIComponent(url.pathname.split("/").at(-1));
     const result=await env.DB.prepare("DELETE FROM connections WHERE provider=? AND user_id IN (SELECT id FROM users WHERE org_id=?)").bind(provider,user.org_id).run(); if (!result.meta?.changes) throw httpError("not-found",404);
+    await auditEvent(env.DB,user.org_id,user.id,"social.disconnected",provider);
     return json({ok:true,providerAuthorizationMustBeRevoked:true},200,secureHeaders(cors));
   }
   if (url.pathname === "/api/account" && request.method === "DELETE") {

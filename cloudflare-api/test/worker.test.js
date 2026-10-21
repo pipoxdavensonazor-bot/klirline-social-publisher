@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import worker from "../src/index.js";
 
 function fixture(overrides = {}) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
-  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql", "0005_plan_usage_limits.sql", "0006_stripe_event_order.sql", "0007_user_auth_version.sql", "0008_internal_team_invitations.sql"]) {
+  for (const migration of readdirSync(new URL("../migrations/", import.meta.url)).filter((name) => /^\d+_.+\.sql$/.test(name)).sort()) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
   class Statement {
@@ -90,10 +90,14 @@ test("internal auth, media, scheduling, and publish idempotency", async () => {
   assert.equal((await expiringMediaSchedule.json()).error, "scheduled-media-expires-too-soon");
   ctx.sqlite.prepare("UPDATE media SET expires_at=? WHERE id=?").run(new Date(Date.now() + 30 * 86400000).toISOString(), media.id);
 
-  const schedule = { text: "Klirline", targets: ["instagram"], mediaId: media.id, runAtUTC: new Date(Date.now() + 120000).toISOString() };
+  const schedule = { text: "Klirline", targets: ["instagram"], mediaId: media.id, runAtUTC: new Date(Date.now() + 120000).toISOString(), timezone: "America/Toronto" };
   const queued = await ctx.request("/api/scheduled", "POST", schedule, { Cookie: cookie, "Idempotency-Key": "schedule-once" });
   const queuedJob = (await queued.json()).job;
   assert.equal(queuedJob.status, "queued");
+  assert.equal(queuedJob.timezone,"America/Toronto");
+  const invalidZone = await ctx.request("/api/scheduled","POST",{...schedule,timezone:"Mars/Olympus_Mons"},{Cookie:cookie,"Idempotency-Key":"schedule-invalid-zone"});
+  assert.equal(invalidZone.status,400);
+  assert.equal((await invalidZone.json()).error,"invalid-time-zone");
   const replayedSchedule = await ctx.request("/api/scheduled", "POST", schedule, { Cookie: cookie, "Idempotency-Key": "schedule-once" });
   assert.equal((await replayedSchedule.json()).deduped, true);
   const scheduleConflict = await ctx.request("/api/scheduled", "POST", { ...schedule, text: "Different content" }, { Cookie: cookie, "Idempotency-Key": "schedule-once" });
@@ -107,6 +111,9 @@ test("internal auth, media, scheduling, and publish idempotency", async () => {
   await Promise.all(pending);
   const processedJobs = await (await ctx.request("/api/scheduled", "GET", null, { Cookie: cookie })).json();
   assert.equal(processedJobs.find((job) => job.id === queuedJob.id).status, "action-required");
+  assert.equal(processedJobs.find((job) => job.id === queuedJob.id).timezone,"America/Toronto");
+  const cronAudit = await (await ctx.request("/api/audit", "GET", null, { Cookie: cookie })).json();
+  assert.ok(cronAudit.some((event) => event.type === "publication.schedule.processed" && event.targetId === queuedJob.id));
 
   const cancelJob = await ctx.request("/api/scheduled", "POST", {
     text: "Annulation", targets: ["linkedin"], runAtUTC: new Date(Date.now() + 120000).toISOString()
@@ -199,6 +206,9 @@ test("internal team invitations create shared workspace readers and allow access
   assert.equal(accepted.status, 201);
   const editorCookie = accepted.headers.get("set-cookie").split(";")[0];
   assert.equal((await ctx.request("/api/team/accept", "POST", { token, password: "editor-secure-password-123" })).status, 400);
+  const earlyAudit = await (await ctx.request("/api/audit", "GET", null, { Cookie: adminCookie })).json();
+  assert.deepEqual(earlyAudit.map((event) => event.type), ["team.invitation.accepted","team.invitation.created"]);
+  assert.equal(earlyAudit[0].actorEmail,"editor@klirline.ca");
 
   const adminId = ctx.sqlite.prepare("SELECT id FROM users WHERE email='owner@klirline.ca'").get().id;
   const editorId = ctx.sqlite.prepare("SELECT id FROM users WHERE email='editor@klirline.ca'").get().id;
@@ -239,7 +249,12 @@ test("internal team invitations create shared workspace readers and allow access
   assert.equal((await ctx.request("/api/posts", "GET", null, { Cookie: editorCookie })).status, 401);
   assert.equal(ctx.sqlite.prepare("SELECT COUNT(*) AS count FROM posts WHERE id='shared-post'").get().count, 1);
   assert.equal((await ctx.request(`/api/team/${encodeURIComponent(editorId)}/activate`,"POST",{}, {Cookie:adminCookie})).status,200);
-  assert.equal((await ctx.request("/api/auth/login","POST",{email:"editor@klirline.ca",password:"editor-secure-password-123"})).status,200);
+  const editorLogin = await ctx.request("/api/auth/login","POST",{email:"editor@klirline.ca",password:"editor-secure-password-123"});
+  assert.equal(editorLogin.status,200);
+  const currentEditorCookie = editorLogin.headers.get("set-cookie").split(";")[0];
+  const finalAudit = await (await ctx.request("/api/audit", "GET", null, { Cookie: adminCookie })).json();
+  for (const type of ["publication.sent","publication.scheduled","publication.schedule-canceled","team.member.disabled","team.member.enabled"]) assert.ok(finalAudit.some((event) => event.type === type),type);
+  assert.equal((await ctx.request("/api/audit", "GET", null, { Cookie: currentEditorCookie })).status,403);
 });
 
 test("health endpoint reports missing production bindings and secrets", async () => {
@@ -251,6 +266,10 @@ test("health endpoint reports missing production bindings and secrets", async ()
   assert.equal((await response.json()).checks.mediaStorage, false);
   const missingKey = fixture({ TOKENS_ENCRYPTION_KEY_HEX: "" });
   assert.equal((await missingKey.request("/api/health")).status, 503);
+  const publicMode = fixture({ INTERNAL_MODE: "false" });
+  const publicModeHealth = await publicMode.request("/api/health");
+  assert.equal(publicModeHealth.status, 503);
+  assert.equal((await publicModeHealth.json()).checks.internalMode,false);
 });
 
 test("LinkedIn OAuth verifies access to the configured organization", async () => {

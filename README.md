@@ -6,7 +6,7 @@ Prototype de planification et de gestion de publications sociales pour Klirline.
 
 Klirline Social Publisher est un outil interne de promotion de Klirline; il n’est pas vendu et ne requiert pas de paiement ni d’abonnement. Le Worker Cloudflare est configuré avec `INTERNAL_MODE=true`: l’administrateur peut inviter des rédacteurs ou lecteurs par lien à usage unique; les connexions, médias, publications et programmations sont partagés dans l’espace. L’inscription publique reste fermée.
 
-Le pilote Cloudflare couvre le texte et les images vers Instagram professionnel, Page Facebook et Page LinkedIn, mais il n’est pas déployé ni validé avec les vrais comptes. L’administrateur seul connecte/déconnecte ces comptes sociaux; les rédacteurs publient et programment depuis les connexions partagées. Les autres réseaux ne sont pas encore disponibles dans ce Worker. Les quotas internes sont configurés à 9 comptes et 5 000 publications par mois. Le serveur Node/Express historique est une référence de développement, pas un service de production.
+Le pilote Cloudflare couvre le texte et les images vers Instagram professionnel, Page Facebook et Page LinkedIn, mais il n’est pas déployé ni validé avec les vrais comptes. L’administrateur seul connecte/déconnecte ces comptes sociaux; les rédacteurs publient et programment depuis les connexions partagées. Les autres réseaux ne sont pas encore disponibles dans ce Worker. Les programmations enregistrent un fuseau horaire IANA par destination. Les quotas internes sont configurés à 9 comptes et 5 000 publications par mois. Un journal d’activité d’administration est disponible dans Préférences. Le serveur Node/Express historique est une référence de développement, pas un service de production.
 
 ## Démarrer le prototype
 
