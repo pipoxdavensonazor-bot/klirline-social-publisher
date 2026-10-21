@@ -340,12 +340,12 @@ test("LinkedIn OAuth verifies access to the configured organization", async () =
   }
 });
 
-test("publication adapters send image posts to Instagram, Facebook Page, and LinkedIn", async () => {
+test("publication adapters send image posts to Instagram, Facebook Page, LinkedIn, and Threads", async () => {
   const ctx = fixture({
     META_APP_ID: "meta-client", META_APP_SECRET: "meta-secret",
     INSTAGRAM_REDIRECT_URI: "https://api.test/oauth/instagram/callback",
     FACEBOOK_REDIRECT_URI: "https://api.test/oauth/facebook/callback", FACEBOOK_PAGE_ID: "page-123",
-    LINKEDIN_ORGANIZATION_NAME: "Klirline Inc."
+    LINKEDIN_ORGANIZATION_NAME: "Klirline Inc.", THREADS_APP_ID:"threads-client",THREADS_APP_SECRET:"threads-secret",THREADS_REDIRECT_URI:"https://api.test/oauth/threads/callback",PLAN_MAX_ACCOUNTS:9
   });
   const cookie = await bootstrap(ctx);
   const calls = [];
@@ -356,15 +356,18 @@ test("publication adapters send image posts to Instagram, Facebook Page, and Lin
     calls.push({ url: target, method: init.method || "GET", headers: new Headers(init.headers || {}), body: init.body });
     if (target.includes("graph.instagram.com/access_token")) return Response.json({ access_token: "instagram-long-lived-token", expires_in: 5184000, token_type: "bearer" });
     if (target.includes("graph.instagram.com/refresh_access_token")) return Response.json({ access_token: "instagram-refreshed-token", expires_in: 5184000, token_type: "bearer" });
+    if (target.includes("graph.threads.net/access_token")) return Response.json({access_token:"threads-long-lived-token",expires_in:5184000,token_type:"bearer"});
+    if (target.includes("graph.threads.net/refresh_access_token")) return Response.json({access_token:"threads-refreshed-token",expires_in:5184000,token_type:"bearer"});
     if (target.includes("/oauth/access_token") || target.includes("/oauth/v2/accessToken")) {
       if (target.includes("linkedin") && String(calls.at(-1)?.body || "").includes("grant_type=refresh_token")) return Response.json({ access_token: "linkedin-refreshed-token", expires_in: 3600, refresh_token: "linkedin-next-refresh-token", refresh_token_expires_in: 86400 });
-      const token = target.includes("linkedin") ? "linkedin-user-token" : target.includes("graph.facebook.com") ? "facebook-user-token" : "instagram-short-lived-token";
+      const token = target.includes("linkedin") ? "linkedin-user-token" : target.includes("graph.facebook.com") ? "facebook-user-token" : target.includes("graph.threads.net") ? "threads-short-lived-token" : "instagram-short-lived-token";
       return Response.json({ access_token: token, expires_in: 3600, ...(target.includes("linkedin") ? { refresh_token: "linkedin-refresh-token", refresh_token_expires_in: 86400 } : {}) });
     }
     if (target.includes("graph.instagram.com/v26.0/me")) return Response.json({ user_id: "ig-account-1", username: "klirlineofficial" });
     if (target.includes("graph.facebook.com/v26.0/me?")) return Response.json({ id: "fb-user-1", name: "Klirline Admin" });
     if (target.includes("graph.facebook.com/v26.0/me/accounts")) return Response.json({ data: [{ id: "page-123", name: "Klirline Page", access_token: "facebook-page-token", tasks: ["CREATE_CONTENT"] }] });
     if (target.includes("api.linkedin.com/v2/userinfo")) return Response.json({ sub: "li-member-1", name: "Klirline Admin" });
+    if (target.includes("graph.threads.net/v1.0/me?fields=id,username")) return Response.json({id:"threads-account-1",username:"klirlineofficial"});
     if (target.includes("organizationAcls")) return Response.json({ elements: [{ state: "APPROVED", role: "ADMINISTRATOR", organization: ctx.env.LINKEDIN_ORGANIZATION_URN }] });
     if (target.includes("graph.instagram.com/v26.0/ig-account-1/media_publish")) return Response.json({ id: "ig-published-1" });
     if (target.includes("graph.instagram.com/v26.0/ig-account-1/media")) return Response.json({ id: "ig-container-1" });
@@ -376,30 +379,34 @@ test("publication adapters send image posts to Instagram, Facebook Page, and Lin
     if (target === "https://upload.linkedin.test/image") return new Response(null, { status: 201 });
     if (target.includes("api.linkedin.com/rest/images/urn%3Ali%3Aimage%3Aimage-1")) return Response.json({ status: "AVAILABLE" });
     if (target === "https://api.linkedin.com/rest/posts") return new Response("{}", { status: 201, headers: { "x-restli-id": "urn:li:share:linkedin-published-1" } });
+    if (target.includes("graph.threads.net/v1.0/threads-account-1/threads_publish")) return Response.json({id:"threads-published-1"});
+    if (target.includes("graph.threads.net/v1.0/threads-account-1/threads")) return Response.json({id:"threads-container-1"});
     throw new Error(`Unexpected mocked provider request: ${target}`);
   };
   try {
-    for (const provider of ["instagram", "facebook", "linkedin"]) {
+    let threadsAuthorization;
+    for (const provider of ["instagram", "facebook", "linkedin", "threads"]) {
       const start = await ctx.request(`/oauth/${provider}/start`, "GET", null, { Cookie: cookie });
       assert.equal(start.status, 302);
+      if(provider==="threads") threadsAuthorization=new URL(start.headers.get("location"));
       const stateCookie = start.headers.get("set-cookie").split(";")[0];
       const state = new URL(start.headers.get("location")).searchParams.get("state");
       const callback = await ctx.request(`/oauth/${provider}/callback?code=fake-${provider}&state=${encodeURIComponent(state)}`, "GET", null, { Cookie: `${cookie}; ${stateCookie}` });
       assert.equal(callback.status, 302);
     }
 
-    ctx.sqlite.prepare("UPDATE connections SET expires_at=? WHERE provider IN ('instagram','linkedin')").run(new Date(Date.now() - 1000).toISOString());
+    ctx.sqlite.prepare("UPDATE connections SET expires_at=? WHERE provider IN ('instagram','linkedin','threads')").run(new Date(Date.now() - 1000).toISOString());
 
     const form = new FormData();
     form.append("file", new Blob([Uint8Array.from([255, 216, 255, 0])], { type: "image/jpeg" }), "campaign.jpg");
     const uploaded = await (await ctx.request("/api/media", "POST", form, { Cookie: cookie })).json();
     const response = await ctx.request("/api/publish", "POST", {
-      text: "Découvrez les services Klirline", targets: ["instagram", "facebook", "linkedin"], mediaId: uploaded.id
-    }, { Cookie: cookie, "Idempotency-Key": "three-network-image-post" });
+      text: "Découvrez les services Klirline", targets: ["instagram", "facebook", "linkedin", "threads"], mediaId: uploaded.id
+    }, { Cookie: cookie, "Idempotency-Key": "four-network-image-post" });
     const publication = await response.json();
     assert.equal(response.status, 200);
-    assert.deepEqual(publication.results.map((item) => item.status), ["published", "published", "published"]);
-    assert.deepEqual(publication.results.map((item) => item.postId), ["ig-published-1", "fb-published-1", "urn:li:share:linkedin-published-1"]);
+    assert.deepEqual(publication.results.map((item) => item.status), ["published", "published", "published", "published"]);
+    assert.deepEqual(publication.results.map((item) => item.postId), ["ig-published-1", "fb-published-1", "urn:li:share:linkedin-published-1","threads-published-1"]);
     assert.equal(calls.find((call) => call.url.includes("instagram.com/v26.0/ig-account-1/media_publish")).headers.get("authorization"), "Bearer instagram-refreshed-token");
     assert.ok(calls.some((call) => call.url.includes("graph.instagram.com/access_token") && new URL(call.url).searchParams.get("grant_type") === "ig_exchange_token"));
     assert.ok(calls.some((call) => call.url.includes("graph.instagram.com/refresh_access_token") && new URL(call.url).searchParams.get("grant_type") === "ig_refresh_token"));
@@ -407,12 +414,20 @@ test("publication adapters send image posts to Instagram, Facebook Page, and Lin
     assert.equal(calls.find((call) => call.url === "https://api.linkedin.com/rest/posts").headers.get("authorization"), "Bearer linkedin-refreshed-token");
     assert.ok(calls.some((call) => call.url.includes("/oauth/v2/accessToken") && String(call.body).includes("grant_type=refresh_token")));
     assert.equal(calls.find((call) => call.url === "https://api.linkedin.com/rest/posts").headers.get("linkedin-version"), "202610");
+    assert.equal(calls.find((call) => call.url.includes("threads_publish")).headers.get("authorization"),"Bearer threads-refreshed-token");
+    assert.equal(threadsAuthorization.searchParams.get("scope"),"threads_basic,threads_content_publish");
+    assert.ok(calls.some((call)=>call.url.includes("graph.threads.net/access_token")&&new URL(call.url).searchParams.get("grant_type")==="th_exchange_token"));
+    assert.ok(calls.some((call)=>call.url.includes("graph.threads.net/refresh_access_token")&&new URL(call.url).searchParams.get("grant_type")==="th_refresh_token"));
+    const textOnly=await ctx.request("/api/publish","POST",{text:"Campagne Threads sans image",targets:["threads"]},{Cookie:cookie,"Idempotency-Key":"threads-text-only-post"});
+    assert.equal(textOnly.status,200);
+    assert.equal((await textOnly.json()).results[0].postId,"threads-container-1");
+    assert.equal(calls.filter(call=>call.url.includes("threads_publish")).length,1,"text posts are auto-published by the Threads text container");
     rejectFacebook = true;
     const partial = await ctx.request("/api/publish", "POST", {
-      text: "Mise à jour Klirline", targets: ["instagram", "facebook", "linkedin"], mediaId: uploaded.id
+      text: "Mise à jour Klirline", targets: ["instagram", "facebook", "linkedin", "threads"], mediaId: uploaded.id
     }, { Cookie: cookie, "Idempotency-Key": "partial-three-network-post" });
     const partialResults = (await partial.json()).results;
-    assert.deepEqual(partialResults.map((item) => item.status), ["published", "failed", "published"]);
+    assert.deepEqual(partialResults.map((item) => item.status), ["published", "failed", "published", "published"]);
     assert.equal(partialResults[1].retryable, true);
   } finally {
     globalThis.fetch = originalFetch;

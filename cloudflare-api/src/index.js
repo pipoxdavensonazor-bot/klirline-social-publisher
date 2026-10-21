@@ -2,10 +2,10 @@ const PROVIDERS = {
   instagram: { name: "Instagram", limit: 2200, scopes: ["instagram_business_basic", "instagram_business_content_publish"] },
   facebook: { name: "Facebook Page", limit: 63206, scopes: ["pages_show_list", "pages_manage_posts", "pages_read_engagement"] },
   linkedin: { name: "LinkedIn Page", limit: 3000, scopes: ["openid", "profile", "r_organization_admin", "w_organization_social"] },
-  x: { name: "X", limit: 280 }, threads: { name: "Threads", limit: 500 }, pinterest: { name: "Pinterest", limit: 800 },
+  x: { name: "X", limit: 280 }, threads: { name: "Threads", limit: 500, scopes: ["threads_basic", "threads_content_publish"] }, pinterest: { name: "Pinterest", limit: 800 },
   bluesky: { name: "Bluesky", limit: 300 }, tiktok: { name: "TikTok", limit: 2200 }, twitch: { name: "Twitch", limit: 500 }
 };
-const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin"];
+const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads"];
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const COOKIE = "klirline_session";
@@ -195,7 +195,8 @@ function providerStatus(id, env) {
   const keys = {
     instagram: ["META_APP_ID", "META_APP_SECRET", "INSTAGRAM_REDIRECT_URI"],
     facebook: ["META_APP_ID", "META_APP_SECRET", "FACEBOOK_REDIRECT_URI", "FACEBOOK_PAGE_ID"],
-    linkedin: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_REDIRECT_URI", "LINKEDIN_ORGANIZATION_URN", "LINKEDIN_VERSION"]
+    linkedin: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_REDIRECT_URI", "LINKEDIN_ORGANIZATION_URN", "LINKEDIN_VERSION"],
+    threads: ["THREADS_APP_ID", "THREADS_APP_SECRET", "THREADS_REDIRECT_URI"]
   }[id];
   if (!keys) return { configured: "out-of-scope", available: false };
   return { configured: keys.every((key) => Boolean(env[key])) ? "ready" : "missing-credentials", available: true };
@@ -220,7 +221,8 @@ function providerEnv(provider, env) {
   return {
     instagram: { id: env.META_APP_ID, secret: env.META_APP_SECRET, redirect: env.INSTAGRAM_REDIRECT_URI, authorize: "https://www.instagram.com/oauth/authorize", token: "https://api.instagram.com/oauth/access_token", scopeSep: ",", scopes: PROVIDERS.instagram.scopes },
     facebook: { id: env.META_APP_ID, secret: env.META_APP_SECRET, redirect: env.FACEBOOK_REDIRECT_URI, authorize: "https://www.facebook.com/dialog/oauth", token: "https://graph.facebook.com/oauth/access_token", scopeSep: ",", scopes: PROVIDERS.facebook.scopes },
-    linkedin: { id: env.LINKEDIN_CLIENT_ID, secret: env.LINKEDIN_CLIENT_SECRET, redirect: env.LINKEDIN_REDIRECT_URI, authorize: "https://www.linkedin.com/oauth/v2/authorization", token: "https://www.linkedin.com/oauth/v2/accessToken", scopeSep: " ", scopes: PROVIDERS.linkedin.scopes }
+    linkedin: { id: env.LINKEDIN_CLIENT_ID, secret: env.LINKEDIN_CLIENT_SECRET, redirect: env.LINKEDIN_REDIRECT_URI, authorize: "https://www.linkedin.com/oauth/v2/authorization", token: "https://www.linkedin.com/oauth/v2/accessToken", scopeSep: " ", scopes: PROVIDERS.linkedin.scopes },
+    threads: { id: env.THREADS_APP_ID, secret: env.THREADS_APP_SECRET, redirect: env.THREADS_REDIRECT_URI, authorize: "https://threads.net/oauth/authorize", token: "https://graph.threads.net/oauth/access_token", scopeSep: ",", scopes: PROVIDERS.threads.scopes }
   }[provider];
 }
 async function oauthStart(provider, user, env, db) {
@@ -241,6 +243,16 @@ async function oauthStart(provider, user, env, db) {
 }
 async function exchangeOAuth(provider, code, env) {
   const cfg = providerEnv(provider, env);
+  if (provider === "threads") {
+    const tokenUrl=new URL(cfg.token);
+    for(const [key,value] of Object.entries({client_id:cfg.id,client_secret:cfg.secret,code,grant_type:"authorization_code",redirect_uri:cfg.redirect})) tokenUrl.searchParams.set(key,value);
+    const response=await fetch(tokenUrl,{method:"POST"}); const shortToken=await response.json().catch(()=>({}));
+    if(!response.ok||!shortToken.access_token) throw httpError("token-exchange-failed",502);
+    const longUrl=new URL("https://graph.threads.net/access_token"); longUrl.searchParams.set("grant_type","th_exchange_token"); longUrl.searchParams.set("client_secret",cfg.secret); longUrl.searchParams.set("access_token",shortToken.access_token);
+    const longResponse=await fetch(longUrl); const longToken=await longResponse.json().catch(()=>({}));
+    if(!longResponse.ok||!longToken.access_token||!longToken.expires_in) throw httpError("long-lived-token-exchange-failed",502);
+    return {...shortToken,...longToken};
+  }
   if (provider === "instagram") {
     const body = new FormData(); body.set("client_id", cfg.id); body.set("client_secret", cfg.secret); body.set("grant_type", "authorization_code"); body.set("redirect_uri", cfg.redirect); body.set("code", code);
     const response = await fetch(cfg.token, { method: "POST", body }); const data = await response.json().catch(() => ({}));
@@ -280,6 +292,9 @@ async function completeOAuth(request, env, db) {
     const page = (pages.data || []).find((item) => String(item.id) === String(env.FACEBOOK_PAGE_ID));
     if (!page?.access_token || !(page.tasks || []).some((task) => ["CREATE_CONTENT", "MANAGE"].includes(task))) throw httpError("facebook-page-not-accessible-for-publishing", 403);
     account = { id: page.id, label: page.name, ownerId: me.id }; connectionToken = page.access_token;
+  } else if (provider === "threads") {
+    const profile=await graphJson(`https://graph.threads.net/${env.THREADS_API_VERSION||"v1.0"}/me?fields=id,username`,token.access_token);
+    account={id:String(profile.id||""),label:profile.username?`@${profile.username}`:""};
   } else {
     const identity = await graphJson("https://api.linkedin.com/v2/userinfo", token.access_token);
     if (!env.LINKEDIN_ORGANIZATION_URN || !/^urn:li:organization:\d+$/.test(env.LINKEDIN_ORGANIZATION_URN)) throw httpError("linkedin-organization-urn-required", 503);
@@ -315,6 +330,8 @@ async function currentAccessToken(provider, connection, env) {
     url.searchParams.set("grant_type", "ig_refresh_token");
     url.searchParams.set("access_token", bundle.accessToken);
     response = await fetch(url);
+  } else if (provider === "threads") {
+    const url=new URL("https://graph.threads.net/refresh_access_token"); url.searchParams.set("grant_type","th_refresh_token"); url.searchParams.set("access_token",bundle.accessToken); response=await fetch(url);
   } else if (provider === "linkedin" && bundle.refreshToken && (!bundle.refreshExpiresAt || Date.parse(bundle.refreshExpiresAt) > Date.now())) {
     const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: bundle.refreshToken, client_id: env.LINKEDIN_CLIENT_ID, client_secret: env.LINKEDIN_CLIENT_SECRET });
     response = await fetch("https://www.linkedin.com/oauth/v2/accessToken", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
@@ -386,6 +403,16 @@ async function publishOne(provider, connection, text, media, env) {
       const post = { author: connection.account_id, commentary: text, visibility: "PUBLIC", distribution: { feedDistribution: "MAIN_FEED", targetEntities: [], thirdPartyDistributionChannels: [] }, ...(mediaContent ? { content: { ...mediaContent, mediaCategory: "IMAGE" } } : {}) };
       const result = await graphJson("https://api.linkedin.com/rest/posts", null, { method: "POST", headers, body: JSON.stringify(post) });
       return { provider, status: "published", postId: result.id || null, message: "ok" };
+    }
+    if (provider === "threads") {
+      if(media && (!media.publicUrl || !["image/jpeg","image/png"].includes(media.mime))) return {provider,status:"action-required",message:"threads-image-requires-public-jpeg-or-png"};
+      const base=`https://graph.threads.net/${env.THREADS_API_VERSION||"v1.0"}/${encodeURIComponent(connection.account_id)}`;
+      const fields=media?{media_type:"IMAGE",image_url:media.publicUrl,text}:{media_type:"TEXT",text,auto_publish_text:"true"};
+      const container=await graphJson(`${base}/threads`,access,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams(fields)});
+      if(!container.id) throw httpError("threads-container-id-missing",502);
+      if(!media) return {provider,status:"published",postId:container.id,message:"ok"};
+      const published=await graphJson(`${base}/threads_publish`,access,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({creation_id:container.id})});
+      return {provider,status:"published",postId:published.id||null,message:"ok"};
     }
   } catch (error) {
     return { provider, status: "failed", message: String(error.message || error).slice(0, 240), retryable: !error.status || error.status === 502 };

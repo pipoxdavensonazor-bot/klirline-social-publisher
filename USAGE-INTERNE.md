@@ -15,7 +15,7 @@
 
 ## Fonctionnalités actuellement disponibles
 
-Le pilote API permet la publication texte/image et la programmation vers Instagram professionnel, une Page Facebook et une Page LinkedIn, sous réserve des accès développeur et autorisations réels. Les autres réseaux de la liste Klirline ne sont pas implémentés dans le Worker de production. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée.
+Le pilote API permet la publication texte/image et la programmation vers Instagram professionnel, une Page Facebook, une Page LinkedIn et Threads, sous réserve des accès développeur et autorisations réels. X, Pinterest, TikTok et Bluesky ne sont pas implémentés dans le Worker de production; Twitch n’est pas un canal de publication générique. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée.
 
 Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000 publications par mois. Elles servent de garde-fous techniques.
 
