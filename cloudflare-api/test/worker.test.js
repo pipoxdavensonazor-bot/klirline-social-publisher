@@ -64,6 +64,15 @@ async function bootstrap(ctx, email = "owner@klirline.ca") {
   return response.headers.get("set-cookie").split(";")[0];
 }
 
+async function approveCampaignDraft(ctx, authorCookie, {text,targets,mediaId=null}, reviewerCookie=authorCookie) {
+  const created=await ctx.request("/api/drafts","POST",{title:"Campagne de test",text,targets,mediaId,countryCode:"CA",languageTag:"fr-CA",timezone:"America/Toronto"},{Cookie:authorCookie});
+  assert.equal(created.status,201,await created.clone().text());
+  const draft=await created.json();
+  assert.equal((await ctx.request(`/api/drafts/${draft.id}`,"POST",{action:"submit-review"},{Cookie:authorCookie})).status,200);
+  assert.equal((await ctx.request(`/api/drafts/${draft.id}/review`,"POST",{decision:"approved"},{Cookie:reviewerCookie})).status,200);
+  return draft.id;
+}
+
 test("internal auth, media, scheduling, and publish idempotency", async () => {
   const ctx = fixture();
   assert.equal((await (await ctx.request("/api/health")).json()).ok, true);
@@ -93,6 +102,7 @@ test("internal auth, media, scheduling, and publish idempotency", async () => {
   ctx.sqlite.prepare("UPDATE media SET expires_at=? WHERE id=?").run(new Date(Date.now() + 30 * 86400000).toISOString(), media.id);
 
   const schedule = { text: "Klirline", targets: ["instagram"], mediaId: media.id, runAtUTC: new Date(Date.now() + 120000).toISOString(), timezone: "America/Toronto" };
+  schedule.draftId=await approveCampaignDraft(ctx,cookie,schedule);
   const queued = await ctx.request("/api/scheduled", "POST", schedule, { Cookie: cookie, "Idempotency-Key": "schedule-once" });
   const queuedJob = (await queued.json()).job;
   assert.equal(queuedJob.status, "queued");
@@ -117,19 +127,21 @@ test("internal auth, media, scheduling, and publish idempotency", async () => {
   const cronAudit = await (await ctx.request("/api/audit", "GET", null, { Cookie: cookie })).json();
   assert.ok(cronAudit.some((event) => event.type === "publication.schedule.processed" && event.targetId === queuedJob.id));
 
-  const cancelJob = await ctx.request("/api/scheduled", "POST", {
-    text: "Annulation", targets: ["linkedin"], runAtUTC: new Date(Date.now() + 120000).toISOString()
-  }, { Cookie: cookie, "Idempotency-Key": "cancel-once" });
+  const cancelPayload={text:"Annulation",targets:["linkedin"],runAtUTC:new Date(Date.now()+120000).toISOString()};
+  cancelPayload.draftId=await approveCampaignDraft(ctx,cookie,cancelPayload);
+  const cancelJob = await ctx.request("/api/scheduled", "POST", cancelPayload, { Cookie: cookie, "Idempotency-Key": "cancel-once" });
   const cancelId = (await cancelJob.json()).job.id;
   const canceled = await ctx.request(`/api/scheduled/${encodeURIComponent(cancelId)}`, "DELETE", null, { Cookie: cookie });
   assert.equal((await canceled.json()).status, "canceled");
 
-  const publish = await ctx.request("/api/publish", "POST", { text: "Klirline", targets: ["facebook"] }, { Cookie: cookie, "Idempotency-Key": "publish-once" });
+  const publishPayload={text:"Klirline",targets:["facebook"]};
+  publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+  const publish = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie, "Idempotency-Key": "publish-once" });
   const result = await publish.json();
   assert.equal(result.results[0].status, "action-required");
-  const replayedPublish = await ctx.request("/api/publish", "POST", { text: "Klirline", targets: ["facebook"] }, { Cookie: cookie, "Idempotency-Key": "publish-once" });
+  const replayedPublish = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie, "Idempotency-Key": "publish-once" });
   assert.equal((await replayedPublish.json()).deduped, true);
-  const publishConflict = await ctx.request("/api/publish", "POST", { text: "Different content", targets: ["facebook"] }, { Cookie: cookie, "Idempotency-Key": "publish-once" });
+  const publishConflict = await ctx.request("/api/publish", "POST", { ...publishPayload, text:"Different content" }, { Cookie: cookie, "Idempotency-Key": "publish-once" });
   assert.equal(publishConflict.status, 409);
   const unknownTarget = await ctx.request("/api/publish", "POST", { text: "Klirline", targets: ["facebook", "unknown-network"] }, { Cookie: cookie });
   assert.equal(unknownTarget.status, 400);
@@ -151,12 +163,14 @@ test("X API publication and scheduling enforce weighted Unicode text length", as
   assert.equal((await control.json()).error, "invalid-x-text");
 
   const urlText = `${"https://example.com/a/very/long/path".padEnd(240, "x")} hello`;
-  const published = await ctx.request("/api/publish", "POST", { text: urlText, targets: ["x"] }, { Cookie: cookie, "Idempotency-Key": "x-weighted-url" });
+  const publishPayload={text:urlText,targets:["x"]};
+  publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+  const published = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie, "Idempotency-Key": "x-weighted-url" });
   assert.equal(published.status, 200);
 
-  const schedule = await ctx.request("/api/scheduled", "POST", {
-    text: "✨".repeat(140), targets: ["x"], runAtUTC: new Date(Date.now() + 120000).toISOString(), timezone: "Asia/Tokyo"
-  }, { Cookie: cookie, "Idempotency-Key": "x-weighted-schedule" });
+  const schedulePayload={text:"✨".repeat(140),targets:["x"],runAtUTC:new Date(Date.now()+120000).toISOString(),timezone:"Asia/Tokyo"};
+  schedulePayload.draftId=await approveCampaignDraft(ctx,cookie,schedulePayload);
+  const schedule = await ctx.request("/api/scheduled", "POST", schedulePayload, { Cookie: cookie, "Idempotency-Key": "x-weighted-schedule" });
   assert.equal(schedule.status, 200);
   const job = (await schedule.json()).job;
   await ctx.request(`/api/scheduled/${job.id}`, "DELETE", null, { Cookie: cookie });
@@ -211,7 +225,9 @@ test("internal workspace publishes without billing and keeps public signup close
   const access = await (await ctx.request("/api/usage", "GET", null, { Cookie: cookie })).json();
   assert.equal(access.status, "internal");
   assert.equal(access.usage.publicationLimit, 5000);
-  const publish = await ctx.request("/api/publish", "POST", { text: "Klirline interne", targets: ["facebook"] }, { Cookie: cookie });
+  const publishPayload={text:"Klirline interne",targets:["facebook"]};
+  publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+  const publish = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie });
   assert.equal(publish.status, 200);
   assert.equal((await publish.json()).results[0].status, "action-required");
   const signup = await ctx.request("/api/auth/signup", "POST", { email: "external@example.ca", password: "a-secure-password-123", organizationName: "External" });
@@ -277,6 +293,18 @@ test("approved campaign drafts gate automatic publishing and scheduling", async 
   assert.equal(reusedAfterCancel.status,200);
 });
 
+test("internal workspace always requires campaign approval even if its flag is misconfigured", async () => {
+  const ctx=fixture({INTERNAL_MODE:"true",REQUIRE_APPROVED_DRAFTS:"false"});
+  const config=await (await ctx.request("/api/public-config")).json();
+  assert.equal(config.requireApprovedDrafts,true);
+  const cookie=await bootstrap(ctx);
+  const response=await ctx.request("/api/publish","POST",{text:"Promotion Klirline",targets:["facebook"]},{Cookie:cookie,"Idempotency-Key":"internal-approval-required"});
+  assert.equal(response.status,409);
+  assert.equal((await response.json()).error,"approved-campaign-draft-required");
+  const health=await (await ctx.request("/api/health")).json();
+  assert.equal(health.checks.approvalGateConfigured,true);
+});
+
 test("internal team invitations create shared workspace readers and allow access revocation", async () => {
   const ctx = fixture({ INTERNAL_MODE: "true" });
   const adminCookie = await bootstrap(ctx);
@@ -315,11 +343,15 @@ test("internal team invitations create shared workspace readers and allow access
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({id:"shared-page-post"});
   try {
-    const published = await ctx.request("/api/publish","POST",{text:"Shared internal campaign",targets:["facebook"],mediaId:sharedMedia.id},{Cookie:editorCookie});
+    const publishPayload={text:"Shared internal campaign",targets:["facebook"],mediaId:sharedMedia.id};
+    publishPayload.draftId=await approveCampaignDraft(ctx,editorCookie,publishPayload,adminCookie);
+    const published = await ctx.request("/api/publish","POST",publishPayload,{Cookie:editorCookie});
     assert.equal(published.status,200);
     assert.equal((await published.json()).results[0].status,"published");
   } finally { globalThis.fetch = originalFetch; }
-  const scheduled = await ctx.request("/api/scheduled","POST",{text:"Shared scheduled campaign",targets:["facebook"],runAtUTC:new Date(Date.now()+120000).toISOString()},{Cookie:adminCookie});
+  const schedulePayload={text:"Shared scheduled campaign",targets:["facebook"],runAtUTC:new Date(Date.now()+120000).toISOString()};
+  schedulePayload.draftId=await approveCampaignDraft(ctx,adminCookie,schedulePayload);
+  const scheduled = await ctx.request("/api/scheduled","POST",schedulePayload,{Cookie:adminCookie});
   assert.equal(scheduled.status,200);
   const scheduleId = (await scheduled.json()).job.id;
   const sharedSchedule = await (await ctx.request("/api/scheduled","GET",null,{Cookie:editorCookie})).json();
@@ -369,9 +401,9 @@ test("health endpoint reports missing production bindings and secrets", async ()
 test("expired schedule leases require review instead of retrying an uncertain public send", async () => {
   const ctx = fixture();
   const cookie = await bootstrap(ctx);
-  const response = await ctx.request("/api/scheduled", "POST", {
-    text: "Campagne mondiale Klirline", targets: ["linkedin"], runAtUTC: new Date(Date.now() + 120000).toISOString()
-  }, { Cookie: cookie, "Idempotency-Key": "expired-worker-lease" });
+  const schedulePayload={text:"Campagne mondiale Klirline",targets:["linkedin"],runAtUTC:new Date(Date.now()+120000).toISOString()};
+  schedulePayload.draftId=await approveCampaignDraft(ctx,cookie,schedulePayload);
+  const response = await ctx.request("/api/scheduled", "POST", schedulePayload, { Cookie: cookie, "Idempotency-Key": "expired-worker-lease" });
   const job = (await response.json()).job;
   ctx.sqlite.prepare("UPDATE scheduled_posts SET status='processing',lease_until=? WHERE id=?").run("2000-01-01T00:00:00.000Z", job.id);
 
@@ -535,9 +567,9 @@ test("publication adapters send image posts to Instagram, Facebook Page, LinkedI
     const form = new FormData();
     form.append("file", new Blob([Uint8Array.from([255, 216, 255, 0])], { type: "image/jpeg" }), "campaign.jpg");
     const uploaded = await (await ctx.request("/api/media", "POST", form, { Cookie: cookie })).json();
-    const response = await ctx.request("/api/publish", "POST", {
-      text: "Découvrez les services Klirline", targets: ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"], mediaId: uploaded.id
-    }, { Cookie: cookie, "Idempotency-Key": "four-network-image-post" });
+    const publishPayload={text:"Découvrez les services Klirline",targets:["instagram","facebook","linkedin","threads","x","pinterest"],mediaId:uploaded.id};
+    publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+    const response = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie, "Idempotency-Key": "four-network-image-post" });
     const publication = await response.json();
     assert.equal(response.status, 200);
     assert.deepEqual(publication.results.map((item) => item.status), ["published", "published", "published", "published", "published", "published"]);
@@ -568,17 +600,21 @@ test("publication adapters send image posts to Instagram, Facebook Page, LinkedI
     assert.equal(calls.find(call=>call.url==="https://api.pinterest.com/v5/pins").headers.get("authorization"),"Bearer pinterest-refreshed-token");
     assert.equal(JSON.parse(calls.find(call=>call.url==="https://api.pinterest.com/v5/pins").body).board_id,"board-1");
     assert.equal(JSON.parse(calls.find(call=>call.url==="https://api.pinterest.com/v5/pins").body).media_source.source_type,"image_url");
-    const textOnly=await ctx.request("/api/publish","POST",{text:"Campagne Threads sans image",targets:["threads"]},{Cookie:cookie,"Idempotency-Key":"threads-text-only-post"});
+    const threadsPayload={text:"Campagne Threads sans image",targets:["threads"]};
+    threadsPayload.draftId=await approveCampaignDraft(ctx,cookie,threadsPayload);
+    const textOnly=await ctx.request("/api/publish","POST",threadsPayload,{Cookie:cookie,"Idempotency-Key":"threads-text-only-post"});
     assert.equal(textOnly.status,200);
     assert.equal((await textOnly.json()).results[0].postId,"threads-container-1");
     assert.equal(calls.filter(call=>call.url.includes("threads_publish")).length,1,"text posts are auto-published by the Threads text container");
-    const xTextOnly = await ctx.request("/api/publish","POST",{text:"Campagne X sans image",targets:["x"]},{Cookie:cookie,"Idempotency-Key":"x-text-only-post"});
+    const xPayload={text:"Campagne X sans image",targets:["x"]};
+    xPayload.draftId=await approveCampaignDraft(ctx,cookie,xPayload);
+    const xTextOnly = await ctx.request("/api/publish","POST",xPayload,{Cookie:cookie,"Idempotency-Key":"x-text-only-post"});
     assert.equal(xTextOnly.status,200);
     assert.equal((await xTextOnly.json()).results[0].postId,"x-published-1");
     rejectFacebook = true;
-    const partial = await ctx.request("/api/publish", "POST", {
-      text: "Mise à jour Klirline", targets: ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"], mediaId: uploaded.id
-    }, { Cookie: cookie, "Idempotency-Key": "partial-three-network-post" });
+    const partialPayload={text:"Mise à jour Klirline",targets:["instagram","facebook","linkedin","threads","x","pinterest"],mediaId:uploaded.id};
+    partialPayload.draftId=await approveCampaignDraft(ctx,cookie,partialPayload);
+    const partial = await ctx.request("/api/publish", "POST", partialPayload, { Cookie: cookie, "Idempotency-Key": "partial-three-network-post" });
     const partialResults = (await partial.json()).results;
     assert.deepEqual(partialResults.map((item) => item.status), ["published", "failed", "published", "published", "published", "published"]);
     assert.equal(partialResults[1].retryable, true);

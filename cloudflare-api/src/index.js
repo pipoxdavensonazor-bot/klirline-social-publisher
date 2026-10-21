@@ -744,7 +744,9 @@ async function createSchedule(request, user, env, db) {
 }
 
 async function requireApprovedDraft(db,user,env,draftId,text,targets,mediaId) {
-  if (env.REQUIRE_APPROVED_DRAFTS !== "true") return null;
+  // The Klirline workspace is internal: publication and scheduling must always
+  // use the exact content approved by an administrator, even if misconfigured.
+  if (env.INTERNAL_MODE !== "true" && env.REQUIRE_APPROVED_DRAFTS !== "true") return null;
   if (!draftId) throw httpError("approved-campaign-draft-required",409);
   const draft=await db.prepare("SELECT id,text,targets_json,media_id,review_status,publication_state FROM campaign_drafts WHERE id=? AND org_id=?").bind(draftId,user.org_id).first();
   if (!draft) throw httpError("approved-campaign-draft-not-found",404);
@@ -890,6 +892,7 @@ async function handle(request, env, ctx) {
       databaseSchema,
       mediaStorage,
       internalMode: env.INTERNAL_MODE === "true",
+      approvalGateConfigured: env.INTERNAL_MODE === "true" || env.REQUIRE_APPROVED_DRAFTS === "true",
       sessionSecret: typeof env.SESSION_SECRET === "string" && env.SESSION_SECRET.length >= 32,
       tokenEncryptionKey: /^[0-9a-f]{64}$/i.test(String(env.TOKENS_ENCRYPTION_KEY_HEX || ""))
     };
@@ -898,7 +901,7 @@ async function handle(request, env, ctx) {
   }
   if (url.pathname === "/api/public-config" && request.method === "GET") {
     const internalMode = env.INTERNAL_MODE === "true";
-    return json({ internalMode, publicSignupEnabled: false, requireApprovedDrafts:env.REQUIRE_APPROVED_DRAFTS==="true" }, 200, secureHeaders(cors));
+    return json({ internalMode, publicSignupEnabled: false, requireApprovedDrafts:internalMode || env.REQUIRE_APPROVED_DRAFTS==="true" }, 200, secureHeaders(cors));
   }
   if (url.pathname === "/oauth/bluesky/client-metadata.json" && request.method === "GET") return json(blueskyClientMetadata(env), 200, secureHeaders(cors));
   if (url.pathname === "/api/providers" && request.method === "GET") return json(providerList(env), 200, secureHeaders(cors));

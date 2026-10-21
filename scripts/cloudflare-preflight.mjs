@@ -17,7 +17,7 @@ if (!config.d1_databases?.length) fail("Binding D1 manquant.");
 if (!config.r2_buckets?.length) fail("Binding R2 manquant.");
 if (config.vars?.INTERNAL_MODE !== "true") fail("Activer INTERNAL_MODE=true pour l’espace Klirline interne.");
 if (config.vars?.ALLOW_PUBLIC_SIGNUP !== "false") fail("Garder ALLOW_PUBLIC_SIGNUP à false; les inscriptions publiques sont interdites.");
-if (config.vars?.REQUIRE_APPROVED_DRAFTS !== "true") fail("Exiger un brouillon partagé approuvé avant toute publication API automatique.");
+if (config.vars?.REQUIRE_APPROVED_DRAFTS !== "true") warn("REQUIRE_APPROVED_DRAFTS devrait rester true; le Worker interne impose néanmoins l’approbation même si cette variable est mal configurée.");
 for (const name of ["FRONTEND_ORIGIN", "PUBLIC_BASE_URL"]) {
   try {
     const url = new URL(config.vars?.[name]);
