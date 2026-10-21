@@ -4,7 +4,7 @@
 
 ## Accès et sécurité
 
-- L’espace Klirline utilise l’organisation réservée `klirline`, exemptée de facturation même lorsque les inscriptions des autres organisations sont activées. Ne partagez pas la clé bootstrap de Klirline.
+- L’API Cloudflare est configurée avec `INTERNAL_MODE=true` et `ALLOW_PUBLIC_SIGNUP=false`.
 - Le premier compte administrateur se crée uniquement avec la clé bootstrap. Ne partagez pas ce compte ni sa clé.
 - L’administrateur invite les employés dans Préférences avec leur courriel professionnel et un rôle rédacteur ou lecteur. Le lien secret expire après 48 heures et ne peut être utilisé qu’une seule fois; transmettez-le par un canal interne approuvé.
 - Les connexions sociales, publications, médias et programmations sont partagés dans l’espace Klirline. Seul l’administrateur gère les connexions OAuth et les membres. Un rédacteur peut publier et programmer; un lecteur peut consulter.
@@ -17,7 +17,7 @@
 
 Le pilote API permet la publication et la programmation vers Instagram professionnel, une Page Facebook, une Page LinkedIn, Threads, X, Pinterest et Bluesky, sous réserve des accès développeur et autorisations réels. X accepte texte et images JPEG/PNG jusqu’à 5 Mo; Pinterest publie une image dans le tableau choisi par l’administrateur. Bluesky accepte texte et une image JPEG/PNG de 2 Mo maximum, avec texte alternatif. Les essais locaux utilisent des réponses fournisseur simulées; les publications réelles doivent être validées sur les comptes Klirline. TikTok reste manuel conformément aux limites de publication d’applications internes; Twitch n’est pas un canal de publication générique. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée. Si une programmation affiche que le résultat de l’envoi est incertain après une interruption du Worker, vérifiez d’abord le compte social concerné. Ne relancez pas avant d’avoir vérifié si le réseau a déjà créé la publication, afin d’éviter un doublon.
 
-Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 publications par mois (`WORKSPACE_MAX_CONNECTED_ACCOUNTS` et `WORKSPACE_MONTHLY_PUBLICATION_CAP`). Ce sont des garde-fous techniques configurables, distincts du prix d’abonnement prévu pour les espaces clients.
+Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 publications par mois (`WORKSPACE_MAX_CONNECTED_ACCOUNTS` et `WORKSPACE_MONTHLY_PUBLICATION_CAP`). Ce sont des garde-fous techniques configurables, pas des forfaits ou des limites de facturation.
 
 ## Processus de campagne multi-pays
 
