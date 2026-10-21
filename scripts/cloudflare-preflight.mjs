@@ -6,6 +6,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const api = resolve(root, "cloudflare-api");
 const config = JSON.parse(readFileSync(resolve(api, "wrangler.jsonc"), "utf8"));
 const migrations = readdirSync(resolve(api, "migrations")).filter((name) => /^\d+_.+\.sql$/.test(name)).sort();
+const latestRequiredMigration = 14;
 const findings = [];
 const fail = (message) => findings.push({ level: "BLOCK", message });
 const warn = (message) => findings.push({ level: "ACTION", message });
@@ -31,8 +32,17 @@ for (const secret of ["SESSION_SECRET", "BOOTSTRAP_ADMIN_KEY", "TOKENS_ENCRYPTIO
   warn(`Créer/configurer le secret Cloudflare ${secret}; ne pas l'ajouter au dépôt.`);
 }
 if (!migrations.length) fail("Aucune migration D1 trouvée.");
-else console.log(`Migrations détectées: ${migrations.join(", ")}`);
+else {
+  console.log(`Migrations détectées: ${migrations.join(", ")}`);
+  const numbers = new Set(migrations.map((name) => Number(name.slice(0, 4))));
+  const missing = Array.from({ length: latestRequiredMigration }, (_, index) => index + 1).filter((number) => !numbers.has(number));
+  if (missing.length) fail(`Migrations manquantes avant la mise en service: ${missing.map((number) => String(number).padStart(4, "0")).join(", ")}.`);
+  if (!numbers.has(13) || !numbers.has(14)) fail("Bluesky requiert les migrations 0013 (sessions OAuth) et 0014 (texte alternatif des médias).");
+}
+console.log("Canaux automatiques du Worker: Instagram, Page Facebook, Page LinkedIn, Threads, X, Pinterest et Bluesky.");
+console.log("Canaux manuels: TikTok (pas de Direct Post pour cet outil interne) et Twitch (pas de post promotionnel générique).");
 warn("Créer et vérifier les identifiants OAuth, domaines/callbacks et accès des comptes sociaux dans les consoles fournisseur.");
+warn("Enregistrer les callbacks Meta (Instagram/Facebook), LinkedIn, Threads, X et Pinterest dans leurs consoles; Bluesky doit servir les métadonnées HTTPS /oauth/bluesky/client-metadata.json et son callback /oauth/bluesky/callback. Aucun secret OAuth partagé n’est requis pour Bluesky.");
 warn("Créer d'abord D1/R2, inscrire l'ID D1 réel dans wrangler.jsonc, configurer les secrets/domaines, appliquer les migrations D1 distantes, puis déployer l'API Worker depuis cloudflare-api.");
 warn("Le Worker frontend doit utiliser la racine du dépôt, « npm run build » comme build et « npm run deploy » comme déploiement de production; ne pas utiliser « wrangler preview » en production.");
 
