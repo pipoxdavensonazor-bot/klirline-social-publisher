@@ -4,7 +4,7 @@ Prototype de planification et de gestion de publications sociales pour Klirline.
 
 ## Statut et mode interne
 
-Klirline Social Publisher est un outil interne de promotion de Klirline; il n’est pas vendu et ne requiert pas de paiement ni d’abonnement. Le Worker Cloudflare est configuré avec `INTERNAL_MODE=true`: l’administrateur peut inviter des rédacteurs ou lecteurs par lien à usage unique; les connexions, médias, publications et programmations sont partagés dans l’espace. L’inscription publique reste fermée.
+Klirline Social Publisher est un outil interne de promotion de Klirline; il n’est pas vendu et ne requiert pas de paiement ni d’abonnement. Le Worker API Cloudflare est configuré avec `INTERNAL_MODE=true`: l’administrateur peut inviter des rédacteurs ou lecteurs par lien à usage unique; les connexions, médias, publications et programmations sont partagés dans l’espace. L’inscription publique reste fermée. Le Worker frontend doit également être protégé derrière Cloudflare Access avant que l’URL de production soit communiquée à l’équipe.
 
 L’espace a des plafonds opérationnels configurables (`WORKSPACE_MAX_CONNECTED_ACCOUNTS=100`, `WORKSPACE_MONTHLY_PUBLICATION_CAP=5000`) pour protéger le service contre les erreurs et les abus. Ils ne définissent aucun forfait; les capacités peuvent être ajustées à la charge réelle de l’équipe.
 

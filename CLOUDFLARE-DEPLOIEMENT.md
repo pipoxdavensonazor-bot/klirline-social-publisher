@@ -42,6 +42,8 @@ Pour connecter le dépôt à l’API, créez un nouveau service **Workers Builds
 
 Configurez les secrets et ressources Cloudflare pour ce nouveau Worker avant le premier déploiement. Laissez le Worker frontend `klirline-social-publisher` à la racine `/` avec `npm run build` et `npm run deploy`; il ne doit pas publier le Worker API. Après déploiement, mettez l’URL HTTPS de l’API dans **Préférences → Backend et compte** sur le site, puis vérifiez `/api/health`. Les noms exacts des champs du tableau de bord peuvent évoluer; contrôlez la configuration avant d’enregistrer. Documentation Cloudflare : [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) et [troubleshooting](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/).
 
+**Accès interne obligatoire avant de diffuser l’URL :** dans Cloudflare Zero Trust → Access → Applications, protégez le Worker frontend `klirline-social-publisher` derrière une politique qui n’autorise que les adresses ou domaines courriel approuvés de l’équipe Klirline. Protégez le Worker lui-même (production et aperçus), pas seulement un hostname, afin que son URL `workers.dev` ne fournisse pas de chemin de contournement. N’activez pas une politique Worker-level Access sur l’API : les callbacks OAuth des réseaux sociaux doivent rester joignables; l’API contrôle elle-même la session utilisateur, le rôle, le CSRF et l’origine CORS. Vérifiez l’URL `workers.dev` et tout domaine personnalisé en navigation privée avant d’inviter l’équipe. Voir [Cloudflare Access pour Workers](https://developers.cloudflare.com/workers/configuration/cloudflare-access/).
+
 1. Depuis `cloudflare-api/`, installer les outils du projet avec `pnpm install --frozen-lockfile`.
 2. Créer la base D1 : `npx wrangler d1 create klirline-social`. Copier l’identifiant retourné dans `wrangler.jsonc` à la place de `REPLACE_WITH_D1_DATABASE_ID`.
 3. Créer le bucket R2 : `npx wrangler r2 bucket create klirline-social-media`.
@@ -64,7 +66,7 @@ Depuis la racine du dépôt, lancez `node scripts/cloudflare-preflight.mjs`. Le 
 
 Ordre de mise en service recommandé :
 
-1. Vérifier que le Worker frontend sert bien les fichiers publics attendus. Les changements poussés sur `commercial-readiness` ne remplacent pas la production tant qu’ils ne sont pas promus selon le workflow Cloudflare choisi.
+1. Vérifier que le Worker frontend sert bien les fichiers attendus et qu’il exige la connexion Cloudflare Access pour toute requête, y compris sur `workers.dev` et les aperçus. Les changements poussés sur `commercial-readiness` ne remplacent pas la production tant qu’ils ne sont pas promus selon le workflow Cloudflare choisi.
 2. Créer la base D1 et le bucket R2. Remplacer l’ID D1 factice dans `cloudflare-api/wrangler.jsonc` par l’identifiant retourné; ne déployer aucun Worker avec le placeholder.
 3. Choisir les domaines HTTPS maîtrisés par Klirline, puis configurer `FRONTEND_ORIGIN`, `PUBLIC_BASE_URL`, les variables OAuth/callbacks et les secrets Cloudflare. Enregistrer les mêmes URL de callback dans chaque console fournisseur.
 4. Depuis `cloudflare-api/`, appliquer toutes les migrations distantes jusqu’à 0014 avec `npx wrangler d1 migrations apply klirline-social --remote`, puis déployer le Worker API avec `npx wrangler deploy`. La migration 0013 ajoute les tables de session OAuth Bluesky; 0014 ajoute le texte alternatif des médias. Vérifier le résultat de `/api/health` après migration.

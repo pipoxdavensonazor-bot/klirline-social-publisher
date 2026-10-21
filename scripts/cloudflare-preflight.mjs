@@ -44,6 +44,7 @@ console.log("Canaux manuels: TikTok (pas de Direct Post pour cet outil interne) 
 warn("Créer et vérifier les identifiants OAuth, domaines/callbacks et accès des comptes sociaux dans les consoles fournisseur.");
 warn("Enregistrer les callbacks Meta (Instagram/Facebook), LinkedIn, Threads, X et Pinterest dans leurs consoles; Bluesky doit servir les métadonnées HTTPS /oauth/bluesky/client-metadata.json et son callback /oauth/bluesky/callback. Aucun secret OAuth partagé n’est requis pour Bluesky.");
 warn("Créer d'abord D1/R2, inscrire l'ID D1 réel dans wrangler.jsonc, configurer les secrets/domaines, appliquer les migrations D1 distantes, puis déployer l'API Worker depuis cloudflare-api.");
+warn("Protéger le Worker frontend klirline-social-publisher lui-même derrière Cloudflare Access avec une politique limitée aux membres Klirline; vérifier aussi l’URL workers.dev et les aperçus. Ne pas mettre les callbacks OAuth de l’API derrière cette politique.");
 warn("Le Worker frontend doit utiliser la racine du dépôt, « npm run build » comme build et « npm run deploy » comme déploiement de production; ne pas utiliser « wrangler preview » en production.");
 
 for (const { level, message } of findings) console.log(`${level === "BLOCK" ? "❌" : "➡️"} ${level}: ${message}`);
