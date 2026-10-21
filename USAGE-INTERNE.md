@@ -15,7 +15,7 @@
 
 ## Fonctionnalités actuellement disponibles
 
-Le pilote API permet la publication et la programmation vers Instagram professionnel, une Page Facebook, une Page LinkedIn, Threads, X et Pinterest, sous réserve des accès développeur et autorisations réels. X accepte texte et images JPEG/PNG jusqu’à 5 Mo; Pinterest publie une image dans le tableau choisi par l’administrateur. Les essais locaux utilisent des réponses fournisseur simulées; les publications réelles doivent être validées sur les comptes Klirline. TikTok et Bluesky ne sont pas implémentés dans le Worker; Twitch n’est pas un canal de publication générique. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée.
+Le pilote API permet la publication et la programmation vers Instagram professionnel, une Page Facebook, une Page LinkedIn, Threads, X et Pinterest, sous réserve des accès développeur et autorisations réels. X accepte texte et images JPEG/PNG jusqu’à 5 Mo; Pinterest publie une image dans le tableau choisi par l’administrateur. Les essais locaux utilisent des réponses fournisseur simulées; les publications réelles doivent être validées sur les comptes Klirline. TikTok et Bluesky ne sont pas implémentés dans le Worker; Twitch n’est pas un canal de publication générique. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée. Si une programmation affiche que le résultat de l’envoi est incertain après une interruption du Worker, vérifiez d’abord le compte social concerné. Ne relancez pas avant d’avoir vérifié si le réseau a déjà créé la publication, afin d’éviter un doublon.
 
 Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000 publications par mois. Elles servent de garde-fous techniques.
 
@@ -26,7 +26,7 @@ Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000
 3. Adapter le format au réseau et au pays; sélectionner uniquement les comptes officiels autorisés.
 4. Enregistrer chaque campagne dans les brouillons partagés et faire approuver le contenu exact par un administrateur avant diffusion. Avec `REQUIRE_APPROVED_DRAFTS=true`, le Worker bloque techniquement les publications API et programmations qui ne référencent pas un brouillon approuvé dont le texte, les destinations et le média correspondent exactement. Toute modification du contenu exige une nouvelle approbation.
 5. Choisir le fuseau horaire IANA du public ciblé dans l’éditeur et vérifier l’heure affichée dans le calendrier; la programmation est conservée en UTC et porte son fuseau de destination.
-6. Après envoi, contrôler l’état et l’URL de chaque publication directement dans le réseau. Traiter les échecs, doublons possibles, quotas et demandes de reconnexion.
+6. Après envoi, contrôler l’état et l’URL de chaque publication directement dans le réseau. Pour un résultat incertain après interruption du Worker, vérifier le compte avant toute nouvelle tentative. Traiter les échecs, doublons possibles, quotas et demandes de reconnexion.
 
 ## Mise en service et exploitation
 

@@ -364,6 +364,27 @@ test("health endpoint reports missing production bindings and secrets", async ()
   assert.equal((await publicModeHealth.json()).checks.internalMode,false);
 });
 
+test("expired schedule leases require review instead of retrying an uncertain public send", async () => {
+  const ctx = fixture();
+  const cookie = await bootstrap(ctx);
+  const response = await ctx.request("/api/scheduled", "POST", {
+    text: "Campagne mondiale Klirline", targets: ["linkedin"], runAtUTC: new Date(Date.now() + 120000).toISOString()
+  }, { Cookie: cookie, "Idempotency-Key": "expired-worker-lease" });
+  const job = (await response.json()).job;
+  ctx.sqlite.prepare("UPDATE scheduled_posts SET status='processing',lease_until=? WHERE id=?").run("2000-01-01T00:00:00.000Z", job.id);
+
+  const pending = [];
+  await worker.scheduled({}, ctx.env, { waitUntil(promise) { pending.push(promise); } });
+  await Promise.all(pending);
+
+  const jobs = await (await ctx.request("/api/scheduled", "GET", null, { Cookie: cookie })).json();
+  const recovered = jobs.find((item) => item.id === job.id);
+  assert.equal(recovered.status, "action-required");
+  assert.deepEqual(recovered.results, [{ provider: "linkedin", status: "action-required", message: "worker-lease-expired-outcome-unknown" }]);
+  const audit = await (await ctx.request("/api/audit", "GET", null, { Cookie: cookie })).json();
+  assert.ok(audit.some((event) => event.type === "publication.schedule.recovery-required" && event.targetId === job.id));
+});
+
 test("OAuth fallback account cap matches the nine-account workspace limit", async () => {
   const ctx = fixture({ PLAN_MAX_ACCOUNTS: "invalid" });
   const cookie = await bootstrap(ctx);

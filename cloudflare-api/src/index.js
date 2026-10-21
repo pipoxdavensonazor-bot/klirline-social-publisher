@@ -624,7 +624,24 @@ async function scheduleView(db, row) {
 }
 async function processDue(env, db) {
   const now = nowIso();
-  await db.prepare("UPDATE scheduled_posts SET status='queued',lease_until=NULL WHERE status='processing' AND lease_until<?").bind(now).run();
+  const expiredLeases = await db.prepare("SELECT id,user_id,campaign_draft_id FROM scheduled_posts WHERE status='processing' AND lease_until<?").bind(now).all();
+  for (const job of expiredLeases.results || []) {
+    const pending = await db.prepare("SELECT provider FROM scheduled_results WHERE job_id=? AND status='queued'").bind(job.id).all();
+    for (const target of pending.results || []) {
+      const result = { provider: target.provider, status: "action-required", message: "worker-lease-expired-outcome-unknown" };
+      await db.prepare("UPDATE scheduled_results SET status='action-required',next_run_at=?,result_json=? WHERE job_id=? AND provider=? AND status='queued'")
+        .bind(now, JSON.stringify(result), job.id, target.provider).run();
+    }
+    const summary = await db.prepare("SELECT status,COUNT(*) AS count FROM scheduled_results WHERE job_id=? GROUP BY status").bind(job.id).all();
+    const states = summary.results || [];
+    const status = states.some((state) => state.status === "queued") ? "action-required" : states.some((state) => state.status === "failed") ? "failed" : states.some((state) => state.status === "action-required") ? "action-required" : "published";
+    const finalized = await db.prepare("UPDATE scheduled_posts SET status=?,lease_until=NULL WHERE id=? AND status='processing' AND lease_until<?").bind(status, job.id, now).run();
+    if (!finalized.meta?.changes) continue;
+    if (job.campaign_draft_id) await db.prepare("UPDATE campaign_drafts SET publication_state=?,review_status=CASE WHEN ?='needs_action' THEN 'draft' ELSE review_status END WHERE id=? AND publication_state='scheduled'")
+      .bind(status === "published" ? "published" : "needs_action", status === "published" ? "published" : "needs_action", job.campaign_draft_id).run();
+    const owner = await db.prepare("SELECT org_id FROM users WHERE id=?").bind(job.user_id).first();
+    if (owner) await auditEvent(db, owner.org_id, job.user_id, "publication.schedule.recovery-required", job.id, { status, message: "worker-lease-expired-outcome-unknown" });
+  }
   const claimed = await db.prepare(`UPDATE scheduled_posts SET status='processing',lease_until=? WHERE id IN (SELECT id FROM scheduled_posts WHERE status='queued' AND run_at<=? ORDER BY run_at LIMIT 10) AND status='queued' RETURNING *`).bind(new Date(Date.now() + 10 * 60000).toISOString(), now).all();
   for (const job of claimed.results || []) {
     const targets = JSON.parse(job.targets_json);
@@ -643,14 +660,15 @@ async function processDue(env, db) {
       const attempts = target.attempts + 1;
       const retry = result.status === "failed" && result.retryable && attempts < 5;
       const next = retry ? new Date(Date.now() + [120000,600000,1800000,7200000][Math.min(attempts - 1, 3)]).toISOString() : nowIso();
-      await db.prepare("UPDATE scheduled_results SET status=?,attempts=?,next_run_at=?,result_json=? WHERE job_id=? AND provider=?").bind(retry ? "queued" : result.status, attempts, next, JSON.stringify(result), job.id, provider).run();
+      await db.prepare("UPDATE scheduled_results SET status=?,attempts=?,next_run_at=?,result_json=? WHERE job_id=? AND provider=? AND status='queued'").bind(retry ? "queued" : result.status, attempts, next, JSON.stringify(result), job.id, provider).run();
     }));
     const summary = await db.prepare("SELECT status,COUNT(*) AS count,MIN(CASE WHEN status='queued' THEN next_run_at END) AS next_run FROM scheduled_results WHERE job_id=? GROUP BY status").bind(job.id).all();
     const states = summary.results || [];
     const queued = states.some((s) => s.status === "queued");
     const status = queued ? "queued" : states.some((s) => s.status === "failed") ? "failed" : states.some((s) => s.status === "action-required") ? "action-required" : "published";
     const nextAt = states.find((s) => s.status === "queued")?.next_run;
-    await db.prepare("UPDATE scheduled_posts SET status=?,run_at=COALESCE(?,run_at),lease_until=NULL WHERE id=? AND status='processing'").bind(status, nextAt ?? null, job.id).run();
+    const finalized = await db.prepare("UPDATE scheduled_posts SET status=?,run_at=COALESCE(?,run_at),lease_until=NULL WHERE id=? AND status='processing' AND lease_until>=?").bind(status, nextAt ?? null, job.id, nowIso()).run();
+    if (!finalized.meta?.changes) continue;
     if (job.campaign_draft_id && !queued) await db.prepare("UPDATE campaign_drafts SET publication_state=?,review_status=CASE WHEN ?='needs_action' THEN 'draft' ELSE review_status END WHERE id=? AND publication_state='scheduled'").bind(status==="published"?"published":"needs_action",status==="published"?"published":"needs_action",job.campaign_draft_id).run();
     const owner = await db.prepare("SELECT org_id FROM users WHERE id=?").bind(job.user_id).first();
     if (owner) {
