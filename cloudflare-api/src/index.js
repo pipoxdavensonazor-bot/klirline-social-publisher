@@ -7,6 +7,11 @@ const PROVIDERS = {
 };
 const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"];
 const REQUIRED_SCHEMA_TABLES = ["users", "oauth_states", "connections", "media", "posts", "scheduled_posts", "scheduled_results", "organizations", "usage_counters", "auth_limits", "team_invitations", "audit_events", "campaign_drafts"];
+const REQUIRED_SCHEMA_COLUMNS = [
+  ["campaign_drafts", "publication_state"],
+  ["posts", "campaign_draft_id"],
+  ["scheduled_posts", "campaign_draft_id"]
+];
 const DEFAULT_MAX_ACCOUNTS = 9;
 const NON_ISO_REGION_CODES = new Set(["AC", "CP", "DG", "EA", "EU", "EZ", "IC", "QO", "TA", "UK", "UN", "XK"]);
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
@@ -698,7 +703,10 @@ async function handle(request, env, ctx) {
     try {
       const placeholders = REQUIRED_SCHEMA_TABLES.map(() => "?").join(",");
       const schema = await env.DB?.prepare(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN (${placeholders})`).bind(...REQUIRED_SCHEMA_TABLES).first();
-      databaseSchema = schema?.count === REQUIRED_SCHEMA_TABLES.length;
+      const columns = await Promise.all(REQUIRED_SCHEMA_COLUMNS.map(([table, column]) =>
+        env.DB.prepare("SELECT COUNT(*) AS count FROM pragma_table_info(?) WHERE name=?").bind(table, column).first()
+      ));
+      databaseSchema = schema?.count === REQUIRED_SCHEMA_TABLES.length && columns.every((result) => result?.count === 1);
     } catch {}
     try { if (env.MEDIA?.head) { await env.MEDIA.head("__klirline_healthcheck__"); mediaStorage = true; } } catch {}
     const checks = {

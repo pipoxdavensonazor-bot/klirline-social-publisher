@@ -324,6 +324,11 @@ test("health endpoint reports missing production bindings and secrets", async ()
   const migrationResponse = await missingMigration.request("/api/health");
   assert.equal(migrationResponse.status, 503);
   assert.equal((await migrationResponse.json()).checks.databaseSchema, false);
+  const missingApprovalMigration=fixture();
+  missingApprovalMigration.sqlite.exec("DROP INDEX campaign_drafts_org_publication_state; ALTER TABLE campaign_drafts DROP COLUMN publication_state");
+  const approvalMigrationResponse=await missingApprovalMigration.request("/api/health");
+  assert.equal(approvalMigrationResponse.status,503);
+  assert.equal((await approvalMigrationResponse.json()).checks.databaseSchema,false);
   const missingR2 = fixture({ MEDIA: null });
   const response = await missingR2.request("/api/health");
   assert.equal(response.status, 503);
