@@ -24,7 +24,7 @@ Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000
 1. Confirmer le pays, le public visé, la langue et le service promu.
 2. Faire relire le texte traduit par une personne compétente; vérifier les promesses de service, prix, conditions et exigences locales avant publication.
 3. Adapter le format au réseau et au pays; sélectionner uniquement les comptes officiels autorisés.
-4. Pour les campagnes sensibles, demander l’approbation d’un responsable Klirline avant programmation. Cette approbation reste un processus d’équipe externe à l’application pour le moment.
+4. Pour les campagnes sensibles, enregistrer le brouillon partagé, l’envoyer en relecture et attendre l’approbation d’un administrateur avant de poursuivre le processus d’équipe. Le statut d’approbation est enregistré, mais le Worker ne bloque pas encore techniquement une publication directe non approuvée.
 5. Choisir le fuseau horaire IANA du public ciblé dans l’éditeur et vérifier l’heure affichée dans le calendrier; la programmation est conservée en UTC et porte son fuseau de destination.
 6. Après envoi, contrôler l’état et l’URL de chaque publication directement dans le réseau. Traiter les échecs, doublons possibles, quotas et demandes de reconnexion.
 
@@ -38,8 +38,8 @@ Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000
 
 ## Écarts à traiter avant un usage régulier par toute l’équipe
 
-- Configurer et appliquer la migration 0009 avant le déploiement de la nouvelle version pour activer le journal d’audit consultable.
-- Partager aussi les brouillons de texte au niveau de l’espace; ils restent pour l’instant locaux au navigateur où ils ont été créés.
-- Ajouter les campagnes multilingues et les pays/cibles liés; chaque programmation conserve déjà son fuseau IANA, mais le calendrier et l’approbation ne gèrent pas encore plusieurs fuseaux/campagnes comme un workflow complet.
+- Appliquer la migration 0011 (ainsi que toutes les migrations précédentes) avant d’utiliser les brouillons partagés, les métadonnées de campagne et la relecture.
+- Les brouillons partagés prennent en charge un pays, une langue, une destination et un fuseau horaire par variante; créer une variante distincte pour chaque adaptation pays/langue.
+- Le statut de relecture est partagé et audité, mais il ne constitue pas encore une barrière technique à la publication directe. Conserver la validation d’un responsable dans le processus d’équipe.
 - Valider les accès et publier de vrais essais contrôlés sur chaque réseau que Klirline prévoit d’utiliser; les liens de profil seuls ne donnent aucun droit de publication.
 - Choisir les réseaux prioritaires pays par pays, en fonction des comptes officiels, permissions et politiques régionales réellement disponibles.

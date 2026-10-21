@@ -27,7 +27,7 @@ function allowedOrigins(env) { return String(env.FRONTEND_ORIGIN || "").split(",
 function corsHeaders(request, env) {
   const origin = request.headers.get("Origin");
   if (!origin || !allowedOrigins(env).includes(origin)) return {};
-  return { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true", "Access-Control-Allow-Headers": "Content-Type, X-Klirline-Request, X-Klirline-Bootstrap, Idempotency-Key", "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS", "Vary": "Origin" };
+  return { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true", "Access-Control-Allow-Headers": "Content-Type, X-Klirline-Request, X-Klirline-Bootstrap, Idempotency-Key", "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Vary": "Origin" };
 }
 function secureHeaders(headers = {}) {
   return { "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store", ...headers };
@@ -525,6 +525,28 @@ async function processDue(env, db) {
   await db.prepare("DELETE FROM usage_counters WHERE period_key<?").bind(new Date(Date.now() - 400 * 86400000).toISOString()).run();
 }
 
+function campaignDraftView(row) {
+  return { id:row.id, authorId:row.author_user_id, updatedById:row.updated_by_user_id, title:row.title, text:row.text, mediaId:row.media_id,
+    targets:JSON.parse(row.targets_json), countryCode:row.country_code, languageTag:row.language_tag, timezone:row.timezone,
+    reviewStatus:row.review_status, reviewNote:row.review_note, createdAt:row.created_at, updatedAt:row.updated_at };
+}
+function campaignDraftInput(body) {
+  const title=String(body.title||"").trim(); const text=String(body.text||"").trim();
+  if (!text || text.length>2200) throw httpError("invalid-draft-text");
+  if (title.length>160) throw httpError("invalid-draft-title");
+  const targets=body.targets===undefined?[]:body.targets;
+  if (!Array.isArray(targets) || targets.length>9 || targets.some((provider)=>typeof provider!=="string"||!PROVIDERS[provider])) throw httpError("unsupported-target");
+  const countryCode=String(body.countryCode||"").trim().toUpperCase();
+  if (countryCode && !/^[A-Z]{2}$/.test(countryCode)) throw httpError("invalid-country-code");
+  const languageTag=String(body.languageTag||"").trim();
+  if (languageTag) { try { if (Intl.getCanonicalLocales(languageTag).length!==1) throw new Error(); } catch { throw httpError("invalid-language-tag"); } }
+  const timezone=String(body.timezone||"").trim();
+  if (timezone) { try { new Intl.DateTimeFormat("en",{timeZone:timezone}); } catch { throw httpError("invalid-time-zone"); } }
+  const mediaId=body.mediaId?String(body.mediaId):null;
+  if(mediaId && mediaId.length>128) throw httpError("invalid-media-id");
+  return {title:title||text.slice(0,80),text,targets:[...new Set(targets)],countryCode,languageTag,timezone,mediaId};
+}
+
 async function handle(request, env, ctx) {
   const url = new URL(request.url); const cors = corsHeaders(request, env);
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: secureHeaders(cors) });
@@ -687,6 +709,50 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/posts" && request.method === "GET") {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT p.* FROM posts p JOIN users author ON author.id=p.user_id WHERE author.org_id=? ORDER BY p.created_at DESC LIMIT 200").bind(user.org_id).all();
     return json((rows.results||[]).map((r)=>({id:r.id,authorId:r.user_id,text:r.text,mediaId:r.media_id,results:JSON.parse(r.results_json),createdAt:r.created_at})),200,secureHeaders(cors));
+  }
+  if (url.pathname === "/api/drafts" && request.method === "GET") {
+    const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT * FROM campaign_drafts WHERE org_id=? ORDER BY updated_at DESC LIMIT 200").bind(user.org_id).all();
+    return json((rows.results||[]).map(campaignDraftView),200,secureHeaders(cors));
+  }
+  if (url.pathname === "/api/drafts" && request.method === "POST") {
+    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const data=campaignDraftInput(await readJson(request)); const id=randomId(),now=nowIso();
+    if(data.mediaId && !await env.DB.prepare("SELECT m.id FROM media m JOIN users owner ON owner.id=m.user_id WHERE m.id=? AND owner.org_id=? AND m.expires_at>?").bind(data.mediaId,user.org_id,now).first()) throw httpError("media-not-found",404);
+    await env.DB.prepare("INSERT INTO campaign_drafts(id,org_id,author_user_id,updated_by_user_id,title,text,targets_json,country_code,language_tag,timezone,media_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(id,user.org_id,user.id,user.id,data.title,data.text,JSON.stringify(data.targets),data.countryCode,data.languageTag,data.timezone,data.mediaId,now,now).run();
+    await auditEvent(env.DB,user.org_id,user.id,"campaign.draft.created",id,{countryCode:data.countryCode,languageTag:data.languageTag});
+    return json(campaignDraftView(await env.DB.prepare("SELECT * FROM campaign_drafts WHERE id=?").bind(id).first()),201,secureHeaders(cors));
+  }
+  if (url.pathname.startsWith("/api/drafts/") && url.pathname.endsWith("/review") && request.method === "POST") {
+    const user=await authenticate(request,env,env.DB,["admin"]); requireInternalWorkspace(env); const id=decodeURIComponent(url.pathname.split("/").at(-2)); const body=await readJson(request); const decision=String(body.decision||""); const note=String(body.note||"").trim();
+    if (!["approved","rejected"].includes(decision) || (decision==="rejected"&&!note) || note.length>1000) throw httpError("invalid-review-decision");
+    const result=await env.DB.prepare("UPDATE campaign_drafts SET review_status=?,review_note=?,updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=? AND review_status='in_review'").bind(decision,note,user.id,nowIso(),id,user.org_id).run();
+    if (!result.meta?.changes) { const found=await env.DB.prepare("SELECT id FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).first(); if(!found) throw httpError("not-found",404); throw httpError("draft-not-in-review",409); }
+    await auditEvent(env.DB,user.org_id,user.id,`campaign.draft.${decision}`,id,{noteLength:note.length});
+    return json(campaignDraftView(await env.DB.prepare("SELECT * FROM campaign_drafts WHERE id=?").bind(id).first()),200,secureHeaders(cors));
+  }
+  if (url.pathname.startsWith("/api/drafts/") && request.method === "PUT") {
+    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const data=campaignDraftInput(await readJson(request));
+    const before=await env.DB.prepare("SELECT review_status FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).first(); if(!before) throw httpError("not-found",404);
+    const status="draft";
+    if(data.mediaId && !await env.DB.prepare("SELECT m.id FROM media m JOIN users owner ON owner.id=m.user_id WHERE m.id=? AND owner.org_id=? AND m.expires_at>?").bind(data.mediaId,user.org_id,nowIso()).first()) throw httpError("media-not-found",404);
+    await env.DB.prepare("UPDATE campaign_drafts SET title=?,text=?,targets_json=?,country_code=?,language_tag=?,timezone=?,media_id=?,review_status=?,review_note='',updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=?")
+      .bind(data.title,data.text,JSON.stringify(data.targets),data.countryCode,data.languageTag,data.timezone,data.mediaId,status,user.id,nowIso(),id,user.org_id).run();
+    await auditEvent(env.DB,user.org_id,user.id,"campaign.draft.updated",id,{countryCode:data.countryCode,languageTag:data.languageTag});
+    return json(campaignDraftView(await env.DB.prepare("SELECT * FROM campaign_drafts WHERE id=?").bind(id).first()),200,secureHeaders(cors));
+  }
+  if (url.pathname.startsWith("/api/drafts/") && request.method === "POST") {
+    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const body=await readJson(request);
+    if(body.action!=="submit-review"&&body.action!=="withdraw-review") throw httpError("invalid-draft-action");
+    const next=body.action==="submit-review"?"in_review":"draft";
+    const result=await env.DB.prepare("UPDATE campaign_drafts SET review_status=?,review_note='',updated_by_user_id=?,updated_at=? WHERE id=? AND org_id=? AND (review_status IN ('draft','rejected') OR (?='draft' AND review_status='in_review'))").bind(next,user.id,nowIso(),id,user.org_id,next).run();
+    if(!result.meta?.changes){const found=await env.DB.prepare("SELECT id FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).first();if(!found)throw httpError("not-found",404);throw httpError("draft-state-conflict",409);}
+    await auditEvent(env.DB,user.org_id,user.id,`campaign.draft.${next}`,id);
+    return json(campaignDraftView(await env.DB.prepare("SELECT * FROM campaign_drafts WHERE id=?").bind(id).first()),200,secureHeaders(cors));
+  }
+  if (url.pathname.startsWith("/api/drafts/") && request.method === "DELETE") {
+    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const id=decodeURIComponent(url.pathname.split("/").at(-1));
+    const result=await env.DB.prepare("DELETE FROM campaign_drafts WHERE id=? AND org_id=?").bind(id,user.org_id).run(); if(!result.meta?.changes)throw httpError("not-found",404);
+    await auditEvent(env.DB,user.org_id,user.id,"campaign.draft.deleted",id); return json({id,deleted:true},200,secureHeaders(cors));
   }
   if (url.pathname === "/api/publish" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const result=await accountPublish(request,user,env,env.DB); await auditEvent(env.DB,user.org_id,user.id,"publication.sent",result.postId,{results:result.results.map(({provider,status})=>({provider,status}))}); return json(result,200,secureHeaders(cors)); }
   if (url.pathname === "/api/media" && request.method === "POST") {
