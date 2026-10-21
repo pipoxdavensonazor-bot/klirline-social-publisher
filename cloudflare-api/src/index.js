@@ -8,6 +8,7 @@ const PROVIDERS = {
 const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin"];
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
+const STRIPE_API_VERSION = "2026-02-25.clover";
 const COOKIE = "klirline_session";
 const OAUTH_COOKIE = "klirline_oauth_state";
 
@@ -102,6 +103,121 @@ function encryptionKey(env) {
   const raw = String(env.TOKENS_ENCRYPTION_KEY_HEX || "");
   if (!/^[0-9a-f]{64}$/i.test(raw)) throw httpError("token-encryption-key-not-configured", 503);
   return crypto.subtle.importKey("raw", Uint8Array.from(raw.match(/.{2}/g), (x) => parseInt(x, 16)), "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+function billingSetupReady(env) {
+  return /^(?:sk|rk)_(?:test|live)_/.test(String(env.STRIPE_SECRET_KEY || ""))
+    && /^price_/.test(String(env.STRIPE_PRICE_ID || ""))
+    && /^whsec_/.test(String(env.STRIPE_WEBHOOK_SECRET || ""));
+}
+function billingFrontendOrigin(env) {
+  const origin = allowedOrigins(env)[0];
+  try { if (origin && new URL(origin).origin === origin) return origin; } catch {}
+  throw httpError("billing-redirect-origin-invalid", 503);
+}
+function isStripeUrl(value, origin) {
+  try { const url = new URL(value); return url.protocol === "https:" && url.origin === origin; } catch { return false; }
+}
+async function stripePost(path, params, env) {
+  if (!env.STRIPE_SECRET_KEY) throw httpError("billing-not-configured", 503);
+  let response;
+  try {
+    response = await fetch(`https://api.stripe.com/v1/${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded", "Stripe-Version": STRIPE_API_VERSION },
+      body: new URLSearchParams(params)
+    });
+  } catch { throw httpError("billing-provider-unavailable", 502); }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw httpError("billing-provider-error", 502);
+  return data;
+}
+async function createCheckoutSession(org, user, env) {
+  if (!env.STRIPE_PRICE_ID) throw httpError("billing-not-configured", 503);
+  const origin = billingFrontendOrigin(env);
+  const params = {
+    mode: "subscription",
+    "line_items[0][price]": env.STRIPE_PRICE_ID,
+    "line_items[0][quantity]": "1",
+    client_reference_id: org.id,
+    "metadata[organization_id]": org.id,
+    "subscription_data[metadata][organization_id]": org.id,
+    success_url: `${origin}/?billing=success`,
+    cancel_url: `${origin}/?billing=cancel`
+  };
+  if (org.stripe_customer_id) params.customer = org.stripe_customer_id;
+  else params.customer_email = user.email;
+  const checkout = await stripePost("checkout/sessions", params, env);
+  if (!isStripeUrl(checkout.url, "https://checkout.stripe.com")) throw httpError("billing-checkout-url-invalid", 502);
+  return checkout.url;
+}
+async function createPortalSession(org, env) {
+  if (!org?.stripe_customer_id) throw httpError("billing-customer-not-found", 409);
+  const origin = billingFrontendOrigin(env);
+  const portal = await stripePost("billing_portal/sessions", { customer: org.stripe_customer_id, return_url: `${origin}/?billing=manage` }, env);
+  if (!isStripeUrl(portal.url, "https://billing.stripe.com")) throw httpError("billing-portal-url-invalid", 502);
+  return portal.url;
+}
+async function requireActiveBilling(db, user) {
+  const org = await db.prepare("SELECT billing_status FROM organizations WHERE id=?").bind(user.org_id).first();
+  if (!org || !["active", "trialing"].includes(org.billing_status)) throw httpError("active-subscription-required", 402);
+}
+async function readLimitedText(request, maxBytes) {
+  const length = Number(request.headers.get("Content-Length") || 0);
+  if (length > maxBytes) throw httpError("request-too-large", 413);
+  if (!request.body) throw httpError("invalid-body", 400);
+  const reader = request.body.getReader(); const chunks = []; let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) { await reader.cancel(); throw httpError("request-too-large", 413); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const bytes = new Uint8Array(total); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw httpError("invalid-body", 400); }
+}
+async function verifyStripeEvent(request, env) {
+  if (!env.STRIPE_WEBHOOK_SECRET) throw httpError("billing-webhook-not-configured", 503);
+  const raw = await readLimitedText(request, 1024 * 1024);
+  const signature = request.headers.get("Stripe-Signature") || "";
+  const parts = signature.split(",").map((part) => part.split("=", 2));
+  const timestamp = Number(parts.find(([key]) => key === "t")?.[1]);
+  const signatures = parts.filter(([key]) => key === "v1").map(([, value]) => value);
+  if (!Number.isInteger(timestamp) || Math.abs(Date.now() / 1000 - timestamp) > 300 || !signatures.length) throw httpError("invalid-billing-signature", 400);
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.STRIPE_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${raw}`)));
+  const expected = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (!signatures.some((candidate) => same(candidate, expected))) throw httpError("invalid-billing-signature", 400);
+  try { return JSON.parse(raw); } catch { throw httpError("invalid-billing-event", 400); }
+}
+async function processStripeEvent(request, env, db) {
+  const event = await verifyStripeEvent(request, env);
+  if (!event?.id || typeof event.type !== "string" || !event.data?.object) throw httpError("invalid-billing-event", 400);
+  if (await db.prepare("SELECT id FROM stripe_events WHERE id=?").bind(event.id).first()) return { received: true, duplicate: true };
+  const object = event.data.object;
+  let orgId = object.metadata?.organization_id || null;
+  const statements = [];
+  if (event.type === "checkout.session.completed" && object.mode === "subscription") {
+    const customerId = typeof object.customer === "string" ? object.customer : object.customer?.id;
+    const subscriptionId = typeof object.subscription === "string" ? object.subscription : object.subscription?.id;
+    if (orgId && customerId) statements.push(db.prepare("UPDATE organizations SET stripe_customer_id=?,stripe_subscription_id=COALESCE(?,stripe_subscription_id) WHERE id=?").bind(customerId, subscriptionId || null, orgId));
+  } else if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(event.type)) {
+    const customerId = typeof object.customer === "string" ? object.customer : object.customer?.id;
+    if (!orgId && customerId) orgId = (await db.prepare("SELECT id FROM organizations WHERE stripe_customer_id=?").bind(customerId).first())?.id;
+    const status = event.type === "customer.subscription.deleted" ? "canceled" : String(object.status || "");
+    if (orgId && status) statements.push(db.prepare("UPDATE organizations SET billing_status=?,stripe_customer_id=COALESCE(?,stripe_customer_id),stripe_subscription_id=? WHERE id=?").bind(status, customerId || null, object.id || null, orgId));
+  }
+  statements.push(db.prepare("INSERT INTO stripe_events(id,processed_at) VALUES(?,?)").bind(event.id, nowIso()));
+  try { await db.batch(statements); }
+  catch (error) {
+    if (await db.prepare("SELECT id FROM stripe_events WHERE id=?").bind(event.id).first()) return { received: true, duplicate: true };
+    throw error;
+  }
+  return { received: true, duplicate: false };
 }
 async function sealToken(value, env) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -470,6 +586,7 @@ async function processDue(env, db) {
 async function handle(request, env, ctx) {
   const url = new URL(request.url); const cors = corsHeaders(request, env);
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: secureHeaders(cors) });
+  if (url.pathname === "/api/billing/webhook" && request.method === "POST") return json(await processStripeEvent(request, env, env.DB), 200, { "Cache-Control": "no-store" });
   if (request.method !== "GET" && request.method !== "HEAD") validateOrigin(request, env);
   if (url.pathname.startsWith("/media/")) {
     const id = decodeURIComponent(url.pathname.slice("/media/".length)); const row = await env.DB.prepare("SELECT * FROM media WHERE id=? AND expires_at>? ").bind(id, nowIso()).first();
@@ -490,13 +607,17 @@ async function handle(request, env, ctx) {
     const ok = Object.values(checks).every(Boolean);
     return json({ ok, checks, providers: LAUNCH_PROVIDERS }, ok ? 200 : 503, secureHeaders(cors));
   }
+  if (url.pathname === "/api/public-config" && request.method === "GET") {
+    const users = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
+    return json({ publicSignupEnabled: env.ALLOW_PUBLIC_SIGNUP === "true" && Boolean(users?.count) && billingSetupReady(env) }, 200, secureHeaders(cors));
+  }
   if (url.pathname === "/api/providers" && request.method === "GET") return json(providerList(env), 200, secureHeaders(cors));
   if (url.pathname === "/api/auth/bootstrap" && request.method === "GET") { const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first(); return json({ needsAdmin: !row?.count }, 200, secureHeaders(cors)); }
   if (url.pathname === "/api/auth/register" && request.method === "POST") {
     const body = await readJson(request); const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
     const email=String(body.email||"").trim().toLowerCase(); const password=String(body.password||"");
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError("invalid-email"); if (password.length < 12 || password.length > 200) throw httpError("password-too-short");
-    if (count?.count) { const user = await authenticate(request, env, env.DB, ["admin"]); const id = randomId(); const salt = randomId(16); const hash = await passwordHash(password, salt); await env.DB.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) VALUES(?,?,?,?,?,?,?)").bind(id,email,salt,hash,"redacteur",user.org_id,nowIso()).run(); const created=await env.DB.prepare("SELECT id,email,role,org_id FROM users WHERE id=?").bind(id).first(); return json({ user:userMetadata(created), first:false },201,secureHeaders(cors)); }
+    if (count?.count) { await authenticate(request, env, env.DB, ["admin"]); throw httpError("team-members-not-supported", 403); }
     if (!env.BOOTSTRAP_ADMIN_KEY || !same(request.headers.get("X-Klirline-Bootstrap"), env.BOOTSTRAP_ADMIN_KEY)) throw httpError("invalid-bootstrap-key", 403);
     if (!env.SESSION_SECRET || env.SESSION_SECRET.length < 32) throw httpError("session-secret-not-configured",503);
     const id=randomId(); const salt=randomId(16); const hash=await passwordHash(password,salt);
@@ -504,6 +625,34 @@ async function handle(request, env, ctx) {
     catch { throw httpError("admin-already-created",409); }
     const user=await env.DB.prepare("SELECT id,email,role,org_id FROM users WHERE id=?").bind(id).first(); if (!user) throw httpError("admin-already-created",409);
     const token=await makeSession(user,env); return json({ user:userMetadata(user), first:true },201,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
+  }
+  if (url.pathname === "/api/auth/signup" && request.method === "POST") {
+    if (env.ALLOW_PUBLIC_SIGNUP !== "true" || !billingSetupReady(env)) throw httpError("customer-signup-not-configured", 503);
+    const existingUsers = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
+    if (!existingUsers?.count) throw httpError("bootstrap-admin-required", 503);
+    const body = await readJson(request);
+    const email = String(body.email || "").trim().toLowerCase(); const password = String(body.password || ""); const name = String(body.organizationName || "").trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError("invalid-email");
+    if (password.length < 12 || password.length > 200) throw httpError("password-too-short");
+    if (name.length < 2 || name.length > 120) throw httpError("invalid-organization-name");
+    const keys = await checkLoginLimit(request, email, env, env.DB);
+    const id = randomId(); const orgId = randomId(); const salt = randomId(16); const hash = await passwordHash(password, salt); const created = nowIso();
+    const statements = [
+      env.DB.prepare("INSERT INTO organizations(id,name,billing_status,created_at) VALUES(?,?,'inactive',?)").bind(orgId, name, created),
+      env.DB.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) VALUES(?,?,?,?,?,?,?)").bind(id, email, salt, hash, "admin", orgId, created)
+    ];
+    try { await env.DB.batch(statements); }
+    catch { throw httpError("signup-failed", 409); }
+    await clearLoginLimit(keys, env.DB);
+    const user = await env.DB.prepare("SELECT id,email,role,org_id FROM users WHERE id=?").bind(id).first();
+    const token = await makeSession(user, env);
+    try {
+      const org = await env.DB.prepare("SELECT id,name,stripe_customer_id,billing_status FROM organizations WHERE id=?").bind(orgId).first();
+      const checkoutUrl = await createCheckoutSession(org, user, env);
+      return json({ user: userMetadata(user), checkoutUrl, billing: { status: "inactive", canPublish: false } }, 201, secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
+    } catch {
+      return json({ user: userMetadata(user), checkoutUrl: null, billing: { status: "inactive", canPublish: false }, billingSetupRequired: true }, 201, secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
+    }
   }
   if (url.pathname === "/api/auth/login" && request.method === "POST") {
     const body=await readJson(request); const email=String(body.email||"").trim().toLowerCase(); const password=String(body.password||""); if(password.length>200) throw httpError("invalid-credentials",401);
@@ -514,6 +663,23 @@ async function handle(request, env, ctx) {
     const token=await makeSession(user,env); return json({ user:userMetadata(user) },200,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
   }
   if (url.pathname === "/api/auth/logout" && request.method === "POST") return json({ok:true},200,secureHeaders({...cors,"Set-Cookie":clearCookie()}));
+  if (url.pathname === "/api/billing" && request.method === "GET") {
+    const user = await authenticate(request, env, env.DB);
+    const org = await env.DB.prepare("SELECT billing_status,stripe_customer_id,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
+    return json({ status: org?.billing_status || "inactive", canPublish: ["active", "trialing"].includes(org?.billing_status), customerPortalAvailable: Boolean(org?.stripe_customer_id) }, 200, secureHeaders(cors));
+  }
+  if (url.pathname === "/api/billing/checkout" && request.method === "POST") {
+    const user = await authenticate(request, env, env.DB, ["admin"]);
+    const org = await env.DB.prepare("SELECT id,name,stripe_customer_id,billing_status FROM organizations WHERE id=?").bind(user.org_id).first();
+    if (!org) throw httpError("organization-not-found", 404);
+    if (["active", "trialing"].includes(org.billing_status)) throw httpError("subscription-already-active", 409);
+    return json({ checkoutUrl: await createCheckoutSession(org, user, env) }, 200, secureHeaders(cors));
+  }
+  if (url.pathname === "/api/billing/portal" && request.method === "POST") {
+    const user = await authenticate(request, env, env.DB, ["admin"]);
+    const org = await env.DB.prepare("SELECT id,stripe_customer_id FROM organizations WHERE id=?").bind(user.org_id).first();
+    return json({ portalUrl: await createPortalSession(org, env) }, 200, secureHeaders(cors));
+  }
   if (url.pathname.startsWith("/oauth/") && url.pathname.endsWith("/start") && request.method === "GET") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); const result=await oauthStart(url.pathname.split("/")[2],user,env,env.DB); return new Response(null,{status:302,headers:{Location:result.location,"Set-Cookie":oauthCookie(result.state),"Cache-Control":"no-store"}}); }
   if (url.pathname.startsWith("/oauth/") && url.pathname.endsWith("/callback") && request.method === "GET") {
     try { await completeOAuth(request,env,env.DB); return new Response(null,{status:302,headers:{Location:`${allowedOrigins(env)[0]}#oauth-ok=${encodeURIComponent(url.pathname.split("/")[2])}`,"Set-Cookie":clearOAuthCookie(),"Cache-Control":"no-store"}}); }
@@ -528,9 +694,9 @@ async function handle(request, env, ctx) {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT * FROM posts WHERE user_id=? ORDER BY created_at DESC LIMIT 200").bind(user.id).all();
     return json((rows.results||[]).map((r)=>({id:r.id,authorId:user.id,text:r.text,mediaId:r.media_id,results:JSON.parse(r.results_json),createdAt:r.created_at})),200,secureHeaders(cors));
   }
-  if (url.pathname === "/api/publish" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); return json(await accountPublish(request,user,env,env.DB),200,secureHeaders(cors)); }
+  if (url.pathname === "/api/publish" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user); return json(await accountPublish(request,user,env,env.DB),200,secureHeaders(cors)); }
   if (url.pathname === "/api/media" && request.method === "POST") {
-    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); const form=await request.formData(); const file=form.get("file");
+    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user); const form=await request.formData(); const file=form.get("file");
     if (!(file instanceof File)) throw httpError("no-file"); if (file.size > MAX_MEDIA_BYTES) throw httpError("file-too-large",413);
     const bytes=new Uint8Array(await file.arrayBuffer()); const mime=sniffImage(bytes); if (!mime) throw httpError("unsupported-or-invalid-image");
     const id=randomId(); const key=`${user.id}/${id}`; const created=nowIso(); const expires=new Date(Date.now()+30*86400000).toISOString();
@@ -539,7 +705,7 @@ async function handle(request, env, ctx) {
     catch (error) { await env.MEDIA.delete(key); throw error; }
     return json({id,url:`${env.PUBLIC_BASE_URL}/media/${encodeURIComponent(id)}`,mime,size:bytes.byteLength},201,secureHeaders(cors));
   }
-  if (url.pathname === "/api/scheduled" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); return json(await createSchedule(request,user,env,env.DB),200,secureHeaders(cors)); }
+  if (url.pathname === "/api/scheduled" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user); return json(await createSchedule(request,user,env,env.DB),200,secureHeaders(cors)); }
   if (url.pathname === "/api/scheduled" && request.method === "GET") {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT * FROM scheduled_posts WHERE user_id=? ORDER BY run_at DESC LIMIT 200").bind(user.id).all();
     return json(await Promise.all((rows.results||[]).map((row)=>scheduleView(env.DB,row))),200,secureHeaders(cors));
@@ -557,9 +723,13 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/account" && request.method === "DELETE") {
     const user=await authenticate(request,env,env.DB); const body=await readJson(request); const row=await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(user.id).first();
     if (!row || !same(await passwordHash(String(body.password||""),row.password_salt),row.password_hash)) throw httpError("invalid-credentials",401);
+    const org=await env.DB.prepare("SELECT billing_status,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
+    if (org?.stripe_subscription_id && !["canceled","incomplete_expired"].includes(org.billing_status)) throw httpError("cancel-subscription-before-deleting-account",409);
     const active=await env.DB.prepare("SELECT COUNT(*) AS count FROM scheduled_posts WHERE user_id=? AND status='processing'").bind(user.id).first(); if (active?.count) throw httpError("scheduled-publication-in-progress",409);
     const objects=await env.DB.prepare("SELECT object_key FROM media WHERE user_id=?").bind(user.id).all(); for (const item of objects.results||[]) await env.MEDIA.delete(item.object_key);
-    await env.DB.prepare("DELETE FROM users WHERE id=?").bind(user.id).run(); return json({ok:true,providerPermissionsRequireRevocation:true},200,secureHeaders({...cors,"Set-Cookie":clearCookie()}));
+    await env.DB.prepare("DELETE FROM users WHERE id=?").bind(user.id).run();
+    if (org) await env.DB.prepare("DELETE FROM organizations WHERE id=? AND NOT EXISTS(SELECT 1 FROM users WHERE org_id=?)").bind(user.org_id,user.org_id).run();
+    return json({ok:true,providerPermissionsRequireRevocation:true},200,secureHeaders({...cors,"Set-Cookie":clearCookie()}));
   }
   return json({error:"not-found"},404,secureHeaders(cors));
 }
@@ -567,7 +737,8 @@ async function handle(request, env, ctx) {
 export default {
   async fetch(request, env, ctx) {
     try {
-      if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "OPTIONS") validateOrigin(request,env);
+      const path = new URL(request.url).pathname;
+      if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "OPTIONS" && path !== "/api/billing/webhook") validateOrigin(request,env);
       const response=await handle(request,env,ctx);
       const cors=corsHeaders(request,env); const headers=new Headers(response.headers); for (const [key,value] of Object.entries(secureHeaders(cors))) if (!headers.has(key) || key.startsWith("Access-Control-")) headers.set(key,value);
       return new Response(response.body,{status:response.status,statusText:response.statusText,headers});

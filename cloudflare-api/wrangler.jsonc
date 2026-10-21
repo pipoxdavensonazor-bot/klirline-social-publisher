@@ -26,6 +26,8 @@
     "LINKEDIN_ORGANIZATION_URN": "",
     "LINKEDIN_ORGANIZATION_NAME": "",
     "META_APP_ID": "",
+    "ALLOW_PUBLIC_SIGNUP": "false",
+    "STRIPE_PRICE_ID": "",
     "INSTAGRAM_REDIRECT_URI": "https://api.klirline.com/oauth/instagram/callback",
     "FACEBOOK_REDIRECT_URI": "https://api.klirline.com/oauth/facebook/callback",
     "LINKEDIN_CLIENT_ID": "",

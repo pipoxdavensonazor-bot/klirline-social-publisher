@@ -7,7 +7,7 @@ import worker from "../src/index.js";
 function fixture(overrides = {}) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
-  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql"]) {
+  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql"]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
   class Statement {
@@ -50,6 +50,12 @@ function fixture(overrides = {}) {
     return worker.fetch(req, env, { waitUntil() {} });
   }
   return { DB, MEDIA, env, objects, request, sqlite };
+}
+
+function base64url(bytes) { return btoa(String.fromCharCode(...bytes)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_"); }
+async function testPasswordHash(password, saltBytes) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  return base64url(new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt: saltBytes, iterations: 310000, hash: "SHA-256" }, key, 256)));
 }
 
 async function bootstrap(ctx, email = "owner@klirline.ca") {
@@ -149,6 +155,68 @@ test("JSON request limit is enforced when Content-Length is absent", async () =>
   assert.equal((await response.json()).error, "request-too-large");
 });
 
+test("subscription signup stays gated until a verified Stripe subscription is active", async () => {
+  const disabled = fixture();
+  await bootstrap(disabled);
+  assert.equal((await (await disabled.request("/api/public-config")).json()).publicSignupEnabled, false);
+  const rejectedSignup = await disabled.request("/api/auth/signup", "POST", { email: "closed@example.ca", password: "a-secure-password-123", organizationName: "Closed Studio" });
+  assert.equal(rejectedSignup.status, 503);
+  const ctx = fixture({ ALLOW_PUBLIC_SIGNUP: "true", STRIPE_SECRET_KEY: "sk_test_example", STRIPE_PRICE_ID: "price_test_example", STRIPE_WEBHOOK_SECRET: "whsec_example" });
+  await bootstrap(ctx);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(init.headers.Authorization, "Bearer sk_test_example");
+    if (String(url) === "https://api.stripe.com/v1/checkout/sessions") {
+      const form = new URLSearchParams(init.body);
+      assert.equal(form.get("mode"), "subscription");
+      assert.equal(form.get("line_items[0][price]"), "price_test_example");
+      return Response.json({ url: "https://checkout.stripe.com/c/pay/cs_test_example" });
+    }
+    if (String(url) === "https://api.stripe.com/v1/billing_portal/sessions") return Response.json({ url: "https://billing.stripe.com/p/session/test_example" });
+    throw new Error(`Unexpected Stripe API request: ${String(url)}`);
+  };
+  try {
+    const signup = await ctx.request("/api/auth/signup", "POST", { email: "owner@example.ca", password: "a-secure-password-123", organizationName: "Example Studio" });
+    assert.equal(signup.status, 201);
+    const signedUp = await signup.json();
+    assert.equal(signedUp.billing.canPublish, false);
+    assert.equal(signedUp.checkoutUrl, "https://checkout.stripe.com/c/pay/cs_test_example");
+    const cookie = signup.headers.get("set-cookie").split(";")[0];
+    const inactiveSchedule = await ctx.request("/api/scheduled", "POST", { text: "Hello", targets: ["facebook"], runAtUTC: new Date(Date.now() + 120000).toISOString() }, { Cookie: cookie });
+    assert.equal(inactiveSchedule.status, 402);
+
+    const event = { id: "evt_subscription_created", type: "customer.subscription.created", data: { object: { id: "sub_example", customer: "cus_example", status: "active", metadata: { organization_id: signedUp.user.org } } } };
+    async function sendStripeEvent(value) {
+      const raw = JSON.stringify(value); const timestamp = Math.floor(Date.now() / 1000);
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(ctx.env.STRIPE_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signatureBytes = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${raw}`)));
+      const signature = [...signatureBytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      const request = new Request("https://api.test/api/billing/webhook", { method: "POST", headers: { "Content-Type": "application/json", "Stripe-Signature": `t=${timestamp},v1=${signature}` }, body: raw });
+      return worker.fetch(request, ctx.env, { waitUntil() {} });
+    }
+    const invalidWebhook = await worker.fetch(new Request("https://api.test/api/billing/webhook", { method: "POST", headers: { "Content-Type": "application/json", "Stripe-Signature": `t=${Math.floor(Date.now() / 1000)},v1=00` }, body: JSON.stringify(event) }), ctx.env, { waitUntil() {} });
+    assert.equal(invalidWebhook.status, 400);
+    const oversizedWebhook = await worker.fetch(new Request("https://api.test/api/billing/webhook", { method: "POST", headers: { "Content-Type": "application/json", "Stripe-Signature": "t=1,v1=00" }, body: " ".repeat(1024 * 1024 + 1) }), ctx.env, { waitUntil() {} });
+    assert.equal(oversizedWebhook.status, 413);
+    const activated = await sendStripeEvent(event);
+    assert.equal(activated.status, 200);
+    assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, true);
+    const scheduled = await ctx.request("/api/scheduled", "POST", { text: "Hello", targets: ["facebook"], runAtUTC: new Date(Date.now() + 120000).toISOString() }, { Cookie: cookie });
+    assert.equal(scheduled.status, 200);
+    const portal = await ctx.request("/api/billing/portal", "POST", {}, { Cookie: cookie });
+    assert.equal((await portal.json()).portalUrl, "https://billing.stripe.com/p/session/test_example");
+    const activeDelete = await ctx.request("/api/account", "DELETE", { password: "a-secure-password-123" }, { Cookie: cookie });
+    assert.equal(activeDelete.status, 409);
+    const duplicate = await sendStripeEvent(event);
+    assert.deepEqual(await duplicate.json(), { received: true, duplicate: true });
+    const canceled = await sendStripeEvent({ ...event, id: "evt_subscription_canceled", type: "customer.subscription.deleted" });
+    assert.equal(canceled.status, 200);
+    assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, false);
+    const deleted = await ctx.request("/api/account", "DELETE", { password: "a-secure-password-123" }, { Cookie: cookie });
+    assert.equal(deleted.status, 200);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("health endpoint reports missing production bindings and secrets", async () => {
   const healthy = fixture();
   assert.equal((await healthy.request("/api/health")).status, 200);
@@ -188,9 +256,12 @@ test("LinkedIn OAuth verifies access to the configured organization", async () =
     const connections = await (await ctx.request("/api/connections", "GET", null, { Cookie: adminCookie })).json();
     assert.ok(connections.some((item) => item.provider === "linkedin" && item.account.label === "LinkedIn organization"));
 
-    const reader = await ctx.request("/api/auth/register", "POST", { email: "reader@klirline.ca", password: "another-secure-password" }, { Cookie: adminCookie });
-    assert.equal(reader.status, 201);
-    const login = await ctx.request("/api/auth/login", "POST", { email: "reader@klirline.ca", password: "another-secure-password" });
+    const forbiddenInvite = await ctx.request("/api/auth/register", "POST", { email: "writer@klirline.ca", password: "another-secure-password" }, { Cookie: adminCookie });
+    assert.equal(forbiddenInvite.status, 403);
+    const saltBytes = Uint8Array.from({ length: 16 }, (_, i) => i + 1); const salt = base64url(saltBytes);
+    const passwordHash = await testPasswordHash("another-secure-password", saltBytes);
+    ctx.sqlite.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) VALUES(?,?,?,?,?,?,?)").run("writer-id", "writer@klirline.ca", salt, passwordHash, "redacteur", "klirline", new Date().toISOString());
+    const login = await ctx.request("/api/auth/login", "POST", { email: "writer@klirline.ca", password: "another-secure-password" });
     const readerCookie = login.headers.get("set-cookie").split(";")[0];
     const deniedOAuth = await begin(readerCookie);
     allowAdminRole = false;
