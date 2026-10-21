@@ -33,7 +33,7 @@ for (const secret of ["SESSION_SECRET", "BOOTSTRAP_ADMIN_KEY", "TOKENS_ENCRYPTIO
 if (!migrations.length) fail("Aucune migration D1 trouvée.");
 else console.log(`Migrations détectées: ${migrations.join(", ")}`);
 warn("Créer et vérifier les identifiants OAuth, domaines/callbacks et accès des comptes sociaux dans les consoles fournisseur.");
-warn("Déployer d'abord l'API Worker depuis la racine cloudflare-api avec « npx wrangler deploy », puis appliquer les migrations D1 distantes.");
+warn("Créer d'abord D1/R2, inscrire l'ID D1 réel dans wrangler.jsonc, configurer les secrets/domaines, appliquer les migrations D1 distantes, puis déployer l'API Worker depuis cloudflare-api.");
 warn("Le Worker frontend doit utiliser la racine du dépôt, « npm run build » comme build et « npm run deploy » comme déploiement de production; ne pas utiliser « wrangler preview » en production.");
 
 for (const { level, message } of findings) console.log(`${level === "BLOCK" ? "❌" : "➡️"} ${level}: ${message}`);

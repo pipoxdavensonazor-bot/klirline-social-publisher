@@ -18,7 +18,7 @@ Dans **Workers & Pages → klirline-social-publisher → Settings → Builds**, 
 - Deploy command : `npm run deploy`
 - Preview command : `npx wrangler preview` (pour les branches de prévisualisation seulement)
 
-La dernière compilation observée échouait parce que `npx wrangler preview` était configuré comme commande de déploiement. Cette commande crée une prévisualisation et ne met pas le site en production. Enregistrer les réglages ci-dessus puis relancer la compilation depuis le tableau de bord. Ne pas remplacer le Worker frontend par la configuration API de `cloudflare-api/`.
+Un build antérieur échouait lorsque `npx wrangler preview` était configuré comme commande de déploiement; cette commande crée une prévisualisation et ne met pas le site en production. Garder `npm run deploy` pour les déploiements frontend et `npx wrangler preview` uniquement pour les aperçus. Vérifier dans le tableau de bord l’état du build avant de considérer une version publiée. Ne pas remplacer le Worker frontend par la configuration API de `cloudflare-api/`.
 
 ## API Cloudflare (pilote à installer)
 
@@ -61,13 +61,13 @@ Depuis la racine du dépôt, lancez `node scripts/cloudflare-preflight.mjs`. Le 
 
 Ordre de mise en service recommandé :
 
-1. Publier le frontend avec le Worker Static Assets de la racine du dépôt; vérifier les pages de l’application et les ressources publiques.
-2. Créer le Worker API distinct avec `cloudflare-api/` comme racine et `npx wrangler deploy` comme commande de déploiement. Créer D1/R2, remplacer l’ID D1 factice, ajouter les secrets dans les paramètres du Worker et appliquer toutes les migrations distantes.
-3. Configurer le domaine API et les variables d’origine/callback exactement, puis redéployer. Tester `/api/health` et conserver le résultat; une réponse saine doit confirmer D1, R2 et secrets.
-4. Dans l’application publiée, saisir l’URL HTTPS de l’API, créer l’espace administrateur avec la clé d’initialisation, puis vérifier connexion, changement de mot de passe, quota, média et programmation sans publier publiquement.
-5. Ajouter les comptes de développeur et OAuth seulement après avoir choisi les canaux du lancement. Faire un essai sur un compte/Page de test avec une publication contrôlée, puis vérifier son statut côté Klirline et chez le fournisseur.
-6. Garder l’accès réservé à l’équipe. Créer l’administrateur initial avec la clé bootstrap et confirmer que l’inscription publique reste désactivée. Dans Préférences → Membres de l’équipe, créer un lien rédacteur/lecteur à usage unique. Le collègue configure la même URL API, ouvre le lien, crée son mot de passe et se connecte.
-7. Connecter les réseaux sous le compte administrateur; leurs autorisations sont partagées avec l’espace. Préparer le support interne, la réauthentification OAuth, la panne de publication et la révocation/réactivation des comptes. Mettre en place alertes, sauvegardes D1/export et un essai de restauration avant un usage régulier.
+1. Vérifier que le Worker frontend sert bien les fichiers publics attendus. Les changements poussés sur `commercial-readiness` ne remplacent pas la production tant qu’ils ne sont pas promus selon le workflow Cloudflare choisi.
+2. Créer la base D1 et le bucket R2. Remplacer l’ID D1 factice dans `cloudflare-api/wrangler.jsonc` par l’identifiant retourné; ne déployer aucun Worker avec le placeholder.
+3. Choisir les domaines HTTPS maîtrisés par Klirline, puis configurer `FRONTEND_ORIGIN`, `PUBLIC_BASE_URL`, les variables OAuth/callbacks et les secrets Cloudflare. Enregistrer les mêmes URL de callback dans chaque console fournisseur.
+4. Depuis `cloudflare-api/`, appliquer toutes les migrations distantes jusqu’à 0012 avec `npx wrangler d1 migrations apply klirline-social --remote`, puis déployer le Worker API avec `npx wrangler deploy`.
+5. Vérifier `/api/health` après déploiement; une réponse saine doit confirmer D1, schéma, R2 et secrets. Configurer l’URL HTTPS de l’API dans Préférences → Backend et compte, puis créer le premier administrateur avec la clé bootstrap.
+6. Vérifier connexion, changement de mot de passe, invitations, rôles, partage de comptes, approbation, média, programmation, annulation et traitement Cron sans envoi public. Puis connecter les comptes de développeur et valider chaque réseau avec un compte/Page de test et une publication contrôlée.
+7. Garder l’accès réservé à l’équipe; dans Préférences → Membres de l’équipe, inviter les collègues avec des liens à usage unique. Avant usage régulier, mettre en place sauvegardes D1, essai de restauration, alertes, responsable support et procédures de réauthentification, révocation et panne de publication.
 
 Le nom de l’exploitant fourni est Klirline Inc. Klirline Social est un outil interne de promotion, sans vente, abonnement ni paiement. Les migrations historiques portant des noms de facturation ne créent pas de parcours de paiement et ne sont pas utilisées comme exigence d’accès dans le mode interne. Les pages de confidentialité et suppression doivent toujours refléter les traitements réels et les exigences des plateformes; le statut de Page professionnelle Facebook n’est pas confirmé. L’adresse fournie est « 10948 Av Rome, H1H 4P4, Canada »; vérifier qu’elle est complète pour les avis légaux.
 
