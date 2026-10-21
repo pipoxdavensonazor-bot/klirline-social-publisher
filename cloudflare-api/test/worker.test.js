@@ -214,6 +214,7 @@ test("shared campaign drafts enforce workspace visibility and approval roles", a
   assert.equal((await ctx.request("/api/drafts","POST",{text:"Mauvais pays",countryCode:"CAN"},{Cookie:editorCookie})).status,400);
   assert.equal((await ctx.request("/api/drafts","POST",{text:"Pays inconnu",countryCode:"ZZ"},{Cookie:editorCookie})).status,400);
   assert.equal((await ctx.request("/api/drafts","POST",{text:"Région réservée",countryCode:"EU"},{Cookie:editorCookie})).status,400);
+  assert.equal((await ctx.request("/api/drafts","POST",{text:"Code hors ISO",countryCode:"UK"},{Cookie:editorCookie})).status,400);
   assert.equal((await ctx.request("/api/drafts","GET")).status,401);
   const audit=await (await ctx.request("/api/audit","GET",null,{Cookie:adminCookie})).json();
   assert.ok(audit.some(event=>event.type==="campaign.draft.rejected"));
