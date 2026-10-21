@@ -20,7 +20,13 @@ const publicFiles = [
   "terms.html",
   "deletion.html",
   "GUIDE-CAMPAGNES-INTERNATIONALES.md",
+  "vendor/klirline-x-text-3.1.0.js",
+  "vendor/THIRD-PARTY-LICENSES.txt",
 ];
 
-for (const file of publicFiles) copyFileSync(resolve(root, file), resolve(output, file));
+for (const file of publicFiles) {
+  const destination = resolve(output, file);
+  mkdirSync(dirname(destination), { recursive: true });
+  copyFileSync(resolve(root, file), destination);
+}
 console.log(`Built ${publicFiles.length} public files in ${output}`);

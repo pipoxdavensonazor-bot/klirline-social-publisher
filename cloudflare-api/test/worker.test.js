@@ -137,6 +137,29 @@ test("internal auth, media, scheduling, and publish idempotency", async () => {
   assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: cookie })).status, 200);
 });
 
+test("X API publication and scheduling enforce weighted Unicode text length", async () => {
+  const ctx = fixture();
+  const cookie = await bootstrap(ctx);
+  const tooLong = await ctx.request("/api/publish", "POST", { text: "✨".repeat(141), targets: ["x"] }, { Cookie: cookie });
+  assert.equal(tooLong.status, 400);
+  assert.equal((await tooLong.json()).error, "too-long:x");
+
+  const control = await ctx.request("/api/publish", "POST", { text: "bonjour\uFFFFX", targets: ["x"] }, { Cookie: cookie });
+  assert.equal(control.status, 400);
+  assert.equal((await control.json()).error, "invalid-x-text");
+
+  const urlText = `${"https://example.com/a/very/long/path".padEnd(240, "x")} hello`;
+  const published = await ctx.request("/api/publish", "POST", { text: urlText, targets: ["x"] }, { Cookie: cookie, "Idempotency-Key": "x-weighted-url" });
+  assert.equal(published.status, 200);
+
+  const schedule = await ctx.request("/api/scheduled", "POST", {
+    text: "✨".repeat(140), targets: ["x"], runAtUTC: new Date(Date.now() + 120000).toISOString(), timezone: "Asia/Tokyo"
+  }, { Cookie: cookie, "Idempotency-Key": "x-weighted-schedule" });
+  assert.equal(schedule.status, 200);
+  const job = (await schedule.json()).job;
+  await ctx.request(`/api/scheduled/${job.id}`, "DELETE", null, { Cookie: cookie });
+});
+
 test("write requests reject missing origin and CSRF marker", async () => {
   const ctx = fixture();
   const response = await worker.fetch(new Request("https://api.test/api/auth/register", {

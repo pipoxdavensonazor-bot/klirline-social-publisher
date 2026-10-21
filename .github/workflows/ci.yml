@@ -16,12 +16,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: pnpm
+          cache-dependency-path: cloudflare-api/pnpm-lock.yaml
+      - name: Install Cloudflare API dependencies
+        working-directory: cloudflare-api
+        run: pnpm install --frozen-lockfile
       - name: Test Cloudflare Worker flows
         working-directory: cloudflare-api
-        run: npm test
+        run: pnpm test
+      - name: Build browser X text validator
+        working-directory: cloudflare-api
+        run: pnpm run build:x-text
+      - name: Check generated X validator is current
+        run: git diff --exit-code -- vendor/klirline-x-text-3.1.0.js vendor/klirline-x-text-3.1.0.js.LEGAL.txt vendor/THIRD-PARTY-LICENSES.txt
       - name: Check Worker and reference backend syntax
         run: |
           node --check cloudflare-api/src/index.js

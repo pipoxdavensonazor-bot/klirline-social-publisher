@@ -33,23 +33,23 @@ Le site public et l’API sont deux projets de déploiement distincts. Le Worker
 Pour connecter le dépôt à l’API, créez un nouveau service **Workers Builds** dans Cloudflare, relié au même dépôt GitHub, avec ces paramètres :
 
 - Root directory : `cloudflare-api`
-- Build command : vide (ou `npm install` si le tableau de bord exige une commande)
-- Deploy command : `npx wrangler deploy`
+- Build command : `pnpm install --frozen-lockfile` (installe les dépendances exactes, dont `twitter-text`, utilisé pour valider les textes X)
+- Deploy command : `pnpm exec wrangler deploy`
 - Nom du Worker : `klirline-social-api`, identique à `name` dans `wrangler.jsonc`
 - Branche de production : la branche choisie pour les mises en production; utilisez la branche de travail seulement si vous voulez explicitement y déployer
 
 Configurez les secrets et ressources Cloudflare pour ce nouveau Worker avant le premier déploiement. Laissez le Worker frontend `klirline-social-publisher` à la racine `/` avec `npm run build` et `npm run deploy`; il ne doit pas publier le Worker API. Après déploiement, mettez l’URL HTTPS de l’API dans **Préférences → Backend et compte** sur le site, puis vérifiez `/api/health`. Les noms exacts des champs du tableau de bord peuvent évoluer; contrôlez la configuration avant d’enregistrer. Documentation Cloudflare : [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) et [troubleshooting](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/).
 
-1. Installer les outils du projet avec `npm install`.
+1. Depuis `cloudflare-api/`, installer les outils du projet avec `pnpm install --frozen-lockfile`.
 2. Créer la base D1 : `npx wrangler d1 create klirline-social`. Copier l’identifiant retourné dans `wrangler.jsonc` à la place de `REPLACE_WITH_D1_DATABASE_ID`.
 3. Créer le bucket R2 : `npx wrangler r2 bucket create klirline-social-media`.
-4. Appliquer la migration : `npx wrangler d1 migrations apply klirline-social --remote`.
+4. Appliquer les migrations : `pnpm exec wrangler d1 migrations apply klirline-social --remote`.
 5. Créer les secrets avec `npx wrangler secret put SESSION_SECRET`, puis répéter pour `BOOTSTRAP_ADMIN_KEY`, `TOKENS_ENCRYPTION_KEY_HEX`, `META_APP_SECRET`, `LINKEDIN_CLIENT_SECRET`, `THREADS_APP_SECRET`, `X_CLIENT_SECRET` et `PINTEREST_APP_SECRET`. Utilisez des valeurs uniques et aléatoires (clé de chiffrement : 64 caractères hexadécimaux). Ne les mettez pas dans `wrangler.jsonc`, GitHub ou le frontend.
 6. Garder `INTERNAL_MODE=true`, `ALLOW_PUBLIC_SIGNUP=false` et `REQUIRE_APPROVED_DRAFTS=true`. Le premier administrateur est créé avec `BOOTSTRAP_ADMIN_KEY`; aucun compte de paiement n’est requis. Appliquer toutes les migrations jusqu’à 0012 avant d’inviter l’équipe et d’utiliser les brouillons de campagne partagés.
 7. Dans `wrangler.jsonc`, remplacer les domaines d’exemple et configurer `FRONTEND_ORIGIN`, `PUBLIC_BASE_URL`, les IDs d’apps, les callbacks, l’URN LinkedIn et, si une vraie Page existe, son ID Facebook. Créer une app Meta avec le cas d’usage Threads, puis renseigner `THREADS_APP_ID` et son secret Cloudflare. Pour X, configurer une app de type Web App/Automated App (client confidentiel), activer OAuth 2.0, enregistrer le callback `/oauth/x/callback`, renseigner `X_CLIENT_ID` dans les variables et le secret `X_CLIENT_SECRET` dans Cloudflare; le code applique PKCE et les scopes de lecture de profil, publication, média et renouvellement. Pour Pinterest, créer l’app, enregistrer exactement `/oauth/pinterest/callback`, ajouter `PINTEREST_APP_ID` dans `wrangler.jsonc` et `PINTEREST_APP_SECRET` comme secret Cloudflare. Les scopes demandés sont `boards:read` et `pins:write`; l’administrateur sélectionne ensuite le tableau de destination dans Comptes sociaux. Le parcours LinkedIn demande `r_organization_admin` et `w_organization_social`, puis vérifie que le membre possède un rôle approuvé lui permettant de publier sur l’organisation configurée (administrateur, gestionnaire de contenu ou publication directe). L’application Klirline garde ses propres connexions sociales réservées à ses administrateurs. Le frontend doit viser l’URL publique de ce Worker dans Préférences → Backend et compte.
-8. Déployer avec `npx wrangler deploy`, puis attacher un domaine personnalisé à l’API dans Cloudflare et enregistrer les callbacks OAuth exacts auprès de Meta (Instagram/Facebook), LinkedIn, Threads, X et Pinterest.
+8. Déployer avec `pnpm exec wrangler deploy`, puis attacher un domaine personnalisé à l’API dans Cloudflare et enregistrer les callbacks OAuth exacts auprès de Meta (Instagram/Facebook), LinkedIn, Threads, X et Pinterest.
 
-Pour travailler localement, copier `cloudflare-api/.dev.vars.example` vers `.dev.vars`, remplacer les valeurs, puis exécuter `npx wrangler d1 migrations apply klirline-social --local` et `npm run dev`. Ne jamais committer `.dev.vars`.
+Pour travailler localement, copier `cloudflare-api/.dev.vars.example` vers `.dev.vars`, remplacer les valeurs, puis exécuter `pnpm exec wrangler d1 migrations apply klirline-social --local` et `pnpm dev`. Ne jamais committer `.dev.vars`.
 
 Les parcours automatisés de l’API peuvent être exécutés avant déploiement depuis `cloudflare-api/` avec `node --test`. Ils couvrent l’authentification, le changement de mot de passe et l’invalidation des anciennes sessions, le stockage simulé, la programmation et son Cron, l’idempotence, la suppression de compte, les requêtes de publication pour les cinq adaptateurs, le renouvellement Instagram/Threads/LinkedIn/X et la vérification des accès Meta/LinkedIn, y compris un échec partiel dû à une limite de débit. Le contrôle `/api/health` vérifie également qu’une requête D1, un accès R2 et les secrets requis fonctionnent. Les tests utilisent SQLite local, un faux bucket R2 et des réponses fournisseur simulées; ils ne remplacent pas les essais avec de vrais comptes ou Cloudflare.
 

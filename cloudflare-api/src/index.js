@@ -1,3 +1,5 @@
+import { xTextMetrics } from "./x-text.js";
+
 const PROVIDERS = {
   instagram: { name: "Instagram", limit: 2200, scopes: ["instagram_business_basic", "instagram_business_content_publish"] },
   facebook: { name: "Facebook Page", limit: 63206, scopes: ["pages_show_list", "pages_manage_posts", "pages_read_engagement"] },
@@ -124,6 +126,14 @@ function requireInternalWorkspace(env) {
 function planLimit(env, key, fallback) {
   const value = Number(env[key]);
   return Number.isSafeInteger(value) && value > 0 && value <= 100000 ? value : fallback;
+}
+function validateTextLength(provider, text) {
+  if (provider === "x") {
+    const metrics = xTextMetrics(text);
+    if (!metrics.valid) throw httpError(metrics.weightedLength > PROVIDERS.x.limit ? "too-long:x" : "invalid-x-text");
+    return;
+  }
+  if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`);
 }
 function usagePeriodKey() {
   const now = new Date();
@@ -501,7 +511,7 @@ async function accountPublish(request, user, env, db) {
   const targets = requestedTargets(body.targets);
   if (!text) throw httpError("empty-text"); if (!targets.length) throw httpError("no-targets");
   for (const provider of targets) {
-    if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`);
+    validateTextLength(provider, text);
     if (["instagram", "pinterest"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`);
     if (provider === "x" && body.mediaId) {
       // The X API currently accepts images up to 5 MB; reject unsupported files before making provider calls.
@@ -559,7 +569,7 @@ async function createSchedule(request, user, env, db) {
   if (!text || !targets.length || !body.runAtUTC || !Number.isFinite(runAt.getTime()) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(body.runAtUTC) || runAt.getTime() < Date.now() + 60000) throw httpError("text-targets-future-runAtUTC-required");
   const timezone = String(body.timezone || "UTC").trim();
   try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(runAt); } catch { throw httpError("invalid-time-zone"); }
-  for (const provider of targets) { if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`); if (["instagram", "pinterest"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`); }
+  for (const provider of targets) { validateTextLength(provider, text); if (["instagram", "pinterest"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`); }
   if (body.mediaId) {
     const media = await getMedia(db, body.mediaId, user.id);
     if (!media) throw httpError("media-not-found", 404);

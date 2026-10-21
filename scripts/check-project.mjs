@@ -27,6 +27,15 @@ assert.equal(rejectedMissingDstTime, true, "nonexistent DST wall times must be r
 assert.equal(wallClockToUTC("2026-11-01T01:30", "America/Toronto").toISOString(), "2026-11-01T05:30:00.000Z", "repeated fall-back wall times use their first occurrence");
 console.log("Campaign timezone and daylight-saving checks: PASS");
 
+const xTextBundle = readFileSync(new URL("../vendor/klirline-x-text-3.1.0.js", import.meta.url), "utf8");
+const xTextContext = {};
+vm.runInNewContext(xTextBundle, xTextContext, { filename: "vendor/klirline-x-text-3.1.0.js" });
+assert.equal(xTextContext.KlirlineXText.xTextMetrics("✨".repeat(140)).weightedLength, 280);
+assert.equal(xTextContext.KlirlineXText.xTextMetrics("✨".repeat(141)).valid, false);
+assert.equal(xTextContext.KlirlineXText.xTextMetrics("https://example.com/a/very/long/path".padEnd(240, "x")).weightedLength, 23);
+if (!html.includes('<script src="vendor/klirline-x-text-3.1.0.js"></script>')) throw new Error("The browser X validator is not loaded by index.html");
+console.log("Browser X weighted-length checks: PASS");
+
 JSON.parse(readFileSync(new URL("../cloudflare-api/wrangler.jsonc", import.meta.url), "utf8"));
 JSON.parse(readFileSync(new URL("../cloudflare-api/package.json", import.meta.url), "utf8"));
 const staticWorker = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
