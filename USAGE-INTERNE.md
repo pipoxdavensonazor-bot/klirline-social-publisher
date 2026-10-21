@@ -6,7 +6,9 @@
 
 - L’API Cloudflare est configurée avec `INTERNAL_MODE=true` et `ALLOW_PUBLIC_SIGNUP=false`.
 - Le premier compte administrateur se crée uniquement avec la clé bootstrap. Ne partagez pas ce compte ni sa clé.
-- L’outil ne doit être accessible qu’aux employés et prestataires expressément autorisés, avec des comptes individuels. Le provisionnement des membres supplémentaires et les espaces partagés ne sont pas encore livrés; ne créez pas de comptes en contournant cette limite.
+- L’administrateur invite les employés dans Préférences avec leur courriel professionnel et un rôle rédacteur ou lecteur. Le lien secret expire après 48 heures et ne peut être utilisé qu’une seule fois; transmettez-le par un canal interne approuvé.
+- Les connexions sociales, publications, médias et programmations sont partagés dans l’espace Klirline. Seul l’administrateur gère les connexions OAuth et les membres. Un rédacteur peut publier et programmer; un lecteur peut consulter.
+- Désactiver un membre révoque ses sessions sans supprimer les campagnes qu’il a créées. Pour le réactiver, l’administrateur utilise le contrôle Réactiver; l’ancien mot de passe reste le sien et une nouvelle connexion est nécessaire.
 - Ne collectez jamais les mots de passe des réseaux sociaux. Utilisez les autorisations OAuth officielles et retirez l’accès des personnes qui quittent l’équipe.
 - Gardez séparés l’environnement de test et les comptes sociaux réels. Protégez les secrets, limitez les administrateurs et vérifiez les journaux de déploiement.
 
@@ -14,7 +16,7 @@
 
 Le pilote API permet la publication texte/image et la programmation vers Instagram professionnel, une Page Facebook et une Page LinkedIn, sous réserve des accès développeur et autorisations réels. Les autres réseaux de la liste Klirline ne sont pas implémentés dans le Worker de production. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée.
 
-Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000 publications par mois. Elles servent de garde-fous techniques, et ne constituent pas une offre ou une facturation.
+Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000 publications par mois. Elles servent de garde-fous techniques.
 
 ## Processus de campagne multi-pays
 
@@ -35,8 +37,8 @@ Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000
 
 ## Écarts à traiter avant un usage régulier par toute l’équipe
 
-- Ajouter la gestion sécurisée des membres avec invitations, rôles et révocation de compte.
-- Partager proprement les connexions, médias, brouillons, publications et programmations au niveau de l’espace Klirline, avec attribution de l’auteur et journal d’audit.
+- Ajouter un journal d’audit consultable pour les publications, changements de rôles, invitations et connexions sociales.
+- Partager aussi les brouillons de texte au niveau de l’espace; ils restent pour l’instant locaux au navigateur où ils ont été créés.
 - Ajouter les campagnes multilingues, pays/cibles, fuseaux horaires explicites et un circuit d’approbation interne.
 - Valider les accès et publier de vrais essais contrôlés sur chaque réseau que Klirline prévoit d’utiliser; les liens de profil seuls ne donnent aucun droit de publication.
 - Choisir les réseaux prioritaires pays par pays, en fonction des comptes officiels, permissions et politiques régionales réellement disponibles.

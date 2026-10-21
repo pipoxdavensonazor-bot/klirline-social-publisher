@@ -7,7 +7,7 @@ import worker from "../src/index.js";
 function fixture(overrides = {}) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
-  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql", "0005_plan_usage_limits.sql", "0006_stripe_event_order.sql", "0007_user_auth_version.sql"]) {
+  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql", "0005_plan_usage_limits.sql", "0006_stripe_event_order.sql", "0007_user_auth_version.sql", "0008_internal_team_invitations.sql"]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
   class Statement {
@@ -33,7 +33,7 @@ function fixture(overrides = {}) {
     async delete(key) { objects.delete(key); }
   };
   const env = {
-    DB, MEDIA, SESSION_SECRET: "s".repeat(48), TOKENS_ENCRYPTION_KEY_HEX: "a".repeat(64),
+    DB, MEDIA, INTERNAL_MODE: "true", SESSION_SECRET: "s".repeat(48), TOKENS_ENCRYPTION_KEY_HEX: "a".repeat(64),
     BOOTSTRAP_ADMIN_KEY: "bootstrap-secret", FRONTEND_ORIGIN: "https://app.test", PUBLIC_BASE_URL: "https://api.test",
     LINKEDIN_CLIENT_ID: "client", LINKEDIN_CLIENT_SECRET: "secret", LINKEDIN_REDIRECT_URI: "https://api.test/oauth/linkedin/callback",
     LINKEDIN_ORGANIZATION_URN: "urn:li:organization:98765", LINKEDIN_VERSION: "202610", ...overrides
@@ -64,7 +64,7 @@ async function bootstrap(ctx, email = "owner@klirline.ca") {
   return response.headers.get("set-cookie").split(";")[0];
 }
 
-test("auth, media, scheduling, publish idempotency, and account deletion", async () => {
+test("internal auth, media, scheduling, and publish idempotency", async () => {
   const ctx = fixture();
   assert.equal((await (await ctx.request("/api/health")).json()).ok, true);
   const cookie = await bootstrap(ctx);
@@ -126,10 +126,8 @@ test("auth, media, scheduling, publish idempotency, and account deletion", async
   assert.equal(unknownTarget.status, 400);
 
   const deletion = await ctx.request("/api/account", "DELETE", { password: "a-secure-password-123" }, { Cookie: cookie });
-  assert.equal(deletion.status, 200);
-  assert.equal(ctx.objects.size, 0);
-  assert.equal(ctx.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get().count, 0);
-  assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: cookie })).status, 401);
+  assert.equal(deletion.status, 409);
+  assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: cookie })).status, 200);
 });
 
 test("write requests reject missing origin and CSRF marker", async () => {
@@ -170,91 +168,6 @@ test("JSON request limit is enforced when Content-Length is absent", async () =>
   assert.equal((await response.json()).error, "request-too-large");
 });
 
-test("subscription signup stays gated until a verified Stripe subscription is active", async () => {
-  const disabled = fixture();
-  await bootstrap(disabled);
-  assert.equal((await (await disabled.request("/api/public-config")).json()).publicSignupEnabled, false);
-  const rejectedSignup = await disabled.request("/api/auth/signup", "POST", { email: "closed@example.ca", password: "a-secure-password-123", organizationName: "Closed Studio" });
-  assert.equal(rejectedSignup.status, 503);
-  const ctx = fixture({ ALLOW_PUBLIC_SIGNUP: "true", STRIPE_SECRET_KEY: "sk_test_example", STRIPE_PRICE_ID: "price_test_example", STRIPE_WEBHOOK_SECRET: "whsec_example", PLAN_MONTHLY_POST_LIMIT: "1", PLAN_MAX_ACCOUNTS: "1" });
-  await bootstrap(ctx);
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    assert.equal(init.headers.Authorization, "Bearer sk_test_example");
-    if (String(url) === "https://api.stripe.com/v1/checkout/sessions") {
-      const form = new URLSearchParams(init.body);
-      assert.equal(form.get("mode"), "subscription");
-      assert.equal(form.get("line_items[0][price]"), "price_test_example");
-      return Response.json({ url: "https://checkout.stripe.com/c/pay/cs_test_example" });
-    }
-    if (String(url) === "https://api.stripe.com/v1/billing_portal/sessions") return Response.json({ url: "https://billing.stripe.com/p/session/test_example" });
-    throw new Error(`Unexpected Stripe API request: ${String(url)}`);
-  };
-  try {
-    const signup = await ctx.request("/api/auth/signup", "POST", { email: "owner@example.ca", password: "a-secure-password-123", organizationName: "Example Studio" });
-    assert.equal(signup.status, 201);
-    const signedUp = await signup.json();
-    assert.equal(signedUp.billing.canPublish, false);
-    assert.equal(signedUp.checkoutUrl, "https://checkout.stripe.com/c/pay/cs_test_example");
-    const cookie = signup.headers.get("set-cookie").split(";")[0];
-    const inactiveSchedule = await ctx.request("/api/scheduled", "POST", { text: "Hello", targets: ["facebook"], runAtUTC: new Date(Date.now() + 120000).toISOString() }, { Cookie: cookie });
-    assert.equal(inactiveSchedule.status, 402);
-
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const event = { id: "evt_subscription_created", created: nowSeconds, type: "customer.subscription.created", data: { object: { id: "sub_example", customer: "cus_example", status: "active", metadata: { organization_id: signedUp.user.org }, items: { data: [{ current_period_start: nowSeconds, current_period_end: nowSeconds + 30 * 86400 }] } } } };
-    async function sendStripeEvent(value) {
-      const raw = JSON.stringify(value); const timestamp = Math.floor(Date.now() / 1000);
-      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(ctx.env.STRIPE_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-      const signatureBytes = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${raw}`)));
-      const signature = [...signatureBytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-      const request = new Request("https://api.test/api/billing/webhook", { method: "POST", headers: { "Content-Type": "application/json", "Stripe-Signature": `t=${timestamp},v1=${signature}` }, body: raw });
-      return worker.fetch(request, ctx.env, { waitUntil() {} });
-    }
-    const invalidWebhook = await worker.fetch(new Request("https://api.test/api/billing/webhook", { method: "POST", headers: { "Content-Type": "application/json", "Stripe-Signature": `t=${Math.floor(Date.now() / 1000)},v1=00` }, body: JSON.stringify(event) }), ctx.env, { waitUntil() {} });
-    assert.equal(invalidWebhook.status, 400);
-    const oversizedWebhook = await worker.fetch(new Request("https://api.test/api/billing/webhook", { method: "POST", headers: { "Content-Type": "application/json", "Stripe-Signature": "t=1,v1=00" }, body: " ".repeat(1024 * 1024 + 1) }), ctx.env, { waitUntil() {} });
-    assert.equal(oversizedWebhook.status, 413);
-    const activated = await sendStripeEvent(event);
-    assert.equal(activated.status, 200);
-    assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, true);
-    ctx.sqlite.prepare("UPDATE organizations SET billing_period_end=? WHERE id=?").run(new Date(Date.now() - 1000).toISOString(), signedUp.user.org);
-    const expiredBilling = await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json());
-    assert.equal(expiredBilling.status, "expired");
-    assert.equal(expiredBilling.canPublish, false);
-    ctx.sqlite.prepare("UPDATE organizations SET billing_period_end=? WHERE id=?").run(new Date(Date.now() + 30 * 86400000).toISOString(), signedUp.user.org);
-    const scheduleBody = { text: "Hello", targets: ["facebook"], runAtUTC: new Date(Date.now() + 120000).toISOString() };
-    const scheduled = await ctx.request("/api/scheduled", "POST", scheduleBody, { Cookie: cookie, "Idempotency-Key": "schedule-one" });
-    assert.equal(scheduled.status, 200);
-    const scheduleId = (await scheduled.json()).job.id;
-    const scheduleReplay = await ctx.request("/api/scheduled", "POST", scheduleBody, { Cookie: cookie, "Idempotency-Key": "schedule-one" });
-    assert.equal((await scheduleReplay.json()).deduped, true);
-    const quotaExceeded = await ctx.request("/api/scheduled", "POST", { ...scheduleBody, text: "Second post" }, { Cookie: cookie, "Idempotency-Key": "schedule-two" });
-    assert.equal(quotaExceeded.status, 429);
-    const canceledSchedule = await ctx.request(`/api/scheduled/${encodeURIComponent(scheduleId)}`, "DELETE", null, { Cookie: cookie });
-    assert.equal((await canceledSchedule.json()).status, "canceled");
-    const directPost = await ctx.request("/api/publish", "POST", { text: "One direct post", targets: ["facebook"] }, { Cookie: cookie, "Idempotency-Key": "publish-one" });
-    assert.equal(directPost.status, 200);
-    const directQuotaExceeded = await ctx.request("/api/scheduled", "POST", { ...scheduleBody, text: "Third post" }, { Cookie: cookie, "Idempotency-Key": "schedule-three" });
-    assert.equal(directQuotaExceeded.status, 429);
-    const usage = await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json());
-    assert.deepEqual({ publications: usage.usage.publications, limit: usage.usage.publicationLimit }, { publications: 1, limit: 1 });
-    const portal = await ctx.request("/api/billing/portal", "POST", {}, { Cookie: cookie });
-    assert.equal((await portal.json()).portalUrl, "https://billing.stripe.com/p/session/test_example");
-    const activeDelete = await ctx.request("/api/account", "DELETE", { password: "a-secure-password-123" }, { Cookie: cookie });
-    assert.equal(activeDelete.status, 409);
-    const duplicate = await sendStripeEvent(event);
-    assert.deepEqual(await duplicate.json(), { received: true, duplicate: true });
-    const canceled = await sendStripeEvent({ ...event, id: "evt_subscription_canceled", type: "customer.subscription.deleted" });
-    assert.equal(canceled.status, 200);
-    assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, false);
-    const staleUpdate = await sendStripeEvent({ ...event, id: "evt_subscription_stale_update", created: nowSeconds - 60, type: "customer.subscription.updated" });
-    assert.equal(staleUpdate.status, 200);
-    assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, false);
-    const deleted = await ctx.request("/api/account", "DELETE", { password: "a-secure-password-123" }, { Cookie: cookie });
-    assert.equal(deleted.status, 200);
-  } finally { globalThis.fetch = originalFetch; }
-});
-
 test("internal workspace publishes without billing and keeps public signup closed", async () => {
   const ctx = fixture({ INTERNAL_MODE: "true", ALLOW_PUBLIC_SIGNUP: "true" });
   await bootstrap(ctx);
@@ -263,14 +176,70 @@ test("internal workspace publishes without billing and keeps public signup close
   const config = await (await ctx.request("/api/public-config")).json();
   assert.equal(config.internalMode, true);
   assert.equal(config.publicSignupEnabled, false);
-  const access = await (await ctx.request("/api/billing", "GET", null, { Cookie: cookie })).json();
+  const access = await (await ctx.request("/api/usage", "GET", null, { Cookie: cookie })).json();
   assert.equal(access.status, "internal");
-  assert.equal(access.canPublish, true);
+  assert.equal(access.usage.publicationLimit, 5000);
   const publish = await ctx.request("/api/publish", "POST", { text: "Klirline interne", targets: ["facebook"] }, { Cookie: cookie });
   assert.equal(publish.status, 200);
   assert.equal((await publish.json()).results[0].status, "action-required");
   const signup = await ctx.request("/api/auth/signup", "POST", { email: "external@example.ca", password: "a-secure-password-123", organizationName: "External" });
-  assert.equal(signup.status, 503);
+  assert.equal(signup.status, 404);
+});
+
+test("internal team invitations create shared workspace readers and allow access revocation", async () => {
+  const ctx = fixture({ INTERNAL_MODE: "true" });
+  const adminCookie = await bootstrap(ctx);
+  const invite = await ctx.request("/api/team/invitations", "POST", { email: "editor@klirline.ca", role: "redacteur" }, { Cookie: adminCookie });
+  assert.equal(invite.status, 201);
+  const inviteData = await invite.json();
+  const token = new URL(inviteData.invitationUrl).searchParams.get("invite");
+  assert.ok(token);
+  assert.equal((await (await ctx.request("/api/team/invitations","GET",null,{Cookie:adminCookie})).json()).length,1);
+  const accepted = await ctx.request("/api/team/accept", "POST", { token, password: "editor-secure-password-123" });
+  assert.equal(accepted.status, 201);
+  const editorCookie = accepted.headers.get("set-cookie").split(";")[0];
+  assert.equal((await ctx.request("/api/team/accept", "POST", { token, password: "editor-secure-password-123" })).status, 400);
+
+  const adminId = ctx.sqlite.prepare("SELECT id FROM users WHERE email='owner@klirline.ca'").get().id;
+  const editorId = ctx.sqlite.prepare("SELECT id FROM users WHERE email='editor@klirline.ca'").get().id;
+  ctx.sqlite.prepare("INSERT INTO posts(id,user_id,text,results_json,created_at) VALUES('shared-post',?,'Internal campaign','[]',?)").run(adminId,new Date().toISOString());
+  const sharedPosts = await (await ctx.request("/api/posts", "GET", null, { Cookie: editorCookie })).json();
+  assert.equal(sharedPosts.length, 1);
+  assert.equal(sharedPosts[0].authorId, adminId);
+  const imageForm = new FormData();
+  imageForm.append("file",new Blob([Uint8Array.from([255,216,255,0])],{type:"image/jpeg"}),"team.jpg");
+  const uploaded = await ctx.request("/api/media","POST",imageForm,{Cookie:adminCookie});
+  const sharedMedia = await uploaded.json();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const rawKey = Uint8Array.from(ctx.env.TOKENS_ENCRYPTION_KEY_HEX.match(/.{2}/g),(byte)=>parseInt(byte,16));
+  const key = await crypto.subtle.importKey("raw",rawKey,"AES-GCM",false,["encrypt"]);
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,new TextEncoder().encode(JSON.stringify({accessToken:"shared-facebook-token"}))));
+  ctx.sqlite.prepare("INSERT INTO connections(id,user_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+    .run("shared-facebook-connection",adminId,"facebook","page-123","Klirline Page",JSON.stringify({id:"page-123",label:"Klirline Page"}),"[]",base64url(sealed),base64url(iv),new Date().toISOString());
+  const sharedConnections = await (await ctx.request("/api/connections","GET",null,{Cookie:editorCookie})).json();
+  assert.equal(sharedConnections[0].account.label,"Klirline Page");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({id:"shared-page-post"});
+  try {
+    const published = await ctx.request("/api/publish","POST",{text:"Shared internal campaign",targets:["facebook"],mediaId:sharedMedia.id},{Cookie:editorCookie});
+    assert.equal(published.status,200);
+    assert.equal((await published.json()).results[0].status,"published");
+  } finally { globalThis.fetch = originalFetch; }
+  const scheduled = await ctx.request("/api/scheduled","POST",{text:"Shared scheduled campaign",targets:["facebook"],runAtUTC:new Date(Date.now()+120000).toISOString()},{Cookie:adminCookie});
+  assert.equal(scheduled.status,200);
+  const scheduleId = (await scheduled.json()).job.id;
+  const sharedSchedule = await (await ctx.request("/api/scheduled","GET",null,{Cookie:editorCookie})).json();
+  assert.ok(sharedSchedule.some(job=>job.id===scheduleId));
+  assert.equal((await ctx.request(`/api/scheduled/${encodeURIComponent(scheduleId)}`,"DELETE",null,{Cookie:editorCookie})).status,200);
+  const members = await (await ctx.request("/api/team", "GET", null, { Cookie: adminCookie })).json();
+  assert.equal(members.length, 2);
+  assert.equal((await ctx.request("/api/team", "GET", null, { Cookie: editorCookie })).status, 403);
+
+  assert.equal((await ctx.request(`/api/team/${encodeURIComponent(editorId)}`, "DELETE", null, { Cookie: adminCookie })).status, 200);
+  assert.equal((await ctx.request("/api/posts", "GET", null, { Cookie: editorCookie })).status, 401);
+  assert.equal(ctx.sqlite.prepare("SELECT COUNT(*) AS count FROM posts WHERE id='shared-post'").get().count, 1);
+  assert.equal((await ctx.request(`/api/team/${encodeURIComponent(editorId)}/activate`,"POST",{}, {Cookie:adminCookie})).status,200);
+  assert.equal((await ctx.request("/api/auth/login","POST",{email:"editor@klirline.ca",password:"editor-secure-password-123"})).status,200);
 });
 
 test("health endpoint reports missing production bindings and secrets", async () => {
@@ -321,10 +290,8 @@ test("LinkedIn OAuth verifies access to the configured organization", async () =
     ctx.sqlite.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) VALUES(?,?,?,?,?,?,?)").run("writer-id", "writer@klirline.ca", salt, passwordHash, "redacteur", "klirline", new Date().toISOString());
     const login = await ctx.request("/api/auth/login", "POST", { email: "writer@klirline.ca", password: "another-secure-password" });
     const readerCookie = login.headers.get("set-cookie").split(";")[0];
-    const deniedOAuth = await begin(readerCookie);
-    allowAdminRole = false;
-    const denied = await ctx.request(`/oauth/linkedin/callback?code=fake&state=${encodeURIComponent(deniedOAuth.state)}`, "GET", null, { Cookie: `${readerCookie}; ${deniedOAuth.cookie}` });
-    assert.equal(denied.status, 403);
+    const deniedOAuth = await ctx.request("/oauth/linkedin/start", "GET", null, { Cookie: readerCookie });
+    assert.equal(deniedOAuth.status, 403);
   } finally {
     globalThis.fetch = originalFetch;
   }
