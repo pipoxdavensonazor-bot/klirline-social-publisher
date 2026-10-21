@@ -16,7 +16,7 @@ Ouvrir `index.html` dans un navigateur pour utiliser la préparation locale. Pou
 
 - [`USAGE-INTERNE.md`](USAGE-INTERNE.md) : processus de campagne et écarts avant usage régulier par l’équipe.
 - [`privacy.html`](privacy.html), [`terms.html`](terms.html), [`deletion.html`](deletion.html) : pages à aligner sur les pratiques réelles, notamment pour les revues des plateformes et demandes de suppression.
-- [`offre.html`](offre.html) : aperçu de l’offre avec le prix proposé de 9,99 USD/mois; inscription et paiement non activés.
+- [`GUIDE-CAMPAGNES-INTERNATIONALES.md`](GUIDE-CAMPAGNES-INTERNATIONALES.md) : méthode de campagne par pays/langue, modes de publication et contrôles de lancement interne.
 - [`klirline-social-backend/AUDIT.md`](klirline-social-backend/AUDIT.md) : audit technique et limites des intégrations.
 
 Avant l’usage opérationnel, déployer l’API sous des domaines maîtrisés par Klirline, confirmer les secrets et accès OAuth, appliquer toutes les migrations jusqu’à 0011, inviter les employés avec leurs comptes individuels et faire des publications de test contrôlées. Les brouillons peuvent être partagés avec un pays, une langue et un fuseau horaire; l’approbation est suivie mais n’empêche pas techniquement un envoi direct. Mettre en place les sauvegardes et alertes, puis tester les procédures de campagne dans chaque région.
