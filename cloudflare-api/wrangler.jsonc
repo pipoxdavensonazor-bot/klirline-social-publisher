@@ -27,14 +27,15 @@
     "LINKEDIN_ORGANIZATION_NAME": "",
     "META_APP_ID": "",
     "ALLOW_PUBLIC_SIGNUP": "false",
+    "INTERNAL_MODE": "true",
     "STRIPE_PRICE_ID": "",
-    "PLAN_MAX_ACCOUNTS": "3",
-    "PLAN_MONTHLY_POST_LIMIT": "50",
+    "PLAN_MAX_ACCOUNTS": "9",
+    "PLAN_MONTHLY_POST_LIMIT": "5000",
     "INSTAGRAM_REDIRECT_URI": "https://api.klirline.com/oauth/instagram/callback",
     "FACEBOOK_REDIRECT_URI": "https://api.klirline.com/oauth/facebook/callback",
     "LINKEDIN_CLIENT_ID": "",
     "LINKEDIN_REDIRECT_URI": "https://api.klirline.com/oauth/linkedin/callback",
-    "COMPANY_LEGAL_NAME": "",
+    "COMPANY_LEGAL_NAME": "Klirline Inc.",
     "PRIVACY_CONTACT_EMAIL": "contact@klirline.ca"
   }
 }

@@ -255,6 +255,24 @@ test("subscription signup stays gated until a verified Stripe subscription is ac
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("internal workspace publishes without billing and keeps public signup closed", async () => {
+  const ctx = fixture({ INTERNAL_MODE: "true", ALLOW_PUBLIC_SIGNUP: "true" });
+  await bootstrap(ctx);
+  ctx.sqlite.prepare("UPDATE organizations SET billing_status='canceled' WHERE id='klirline'").run();
+  const cookie = (await ctx.request("/api/auth/login", "POST", { email: "owner@klirline.ca", password: "a-secure-password-123" })).headers.get("set-cookie").split(";")[0];
+  const config = await (await ctx.request("/api/public-config")).json();
+  assert.equal(config.internalMode, true);
+  assert.equal(config.publicSignupEnabled, false);
+  const access = await (await ctx.request("/api/billing", "GET", null, { Cookie: cookie })).json();
+  assert.equal(access.status, "internal");
+  assert.equal(access.canPublish, true);
+  const publish = await ctx.request("/api/publish", "POST", { text: "Klirline interne", targets: ["facebook"] }, { Cookie: cookie });
+  assert.equal(publish.status, 200);
+  assert.equal((await publish.json()).results[0].status, "action-required");
+  const signup = await ctx.request("/api/auth/signup", "POST", { email: "external@example.ca", password: "a-secure-password-123", organizationName: "External" });
+  assert.equal(signup.status, 503);
+});
+
 test("health endpoint reports missing production bindings and secrets", async () => {
   const healthy = fixture();
   assert.equal((await healthy.request("/api/health")).status, 200);

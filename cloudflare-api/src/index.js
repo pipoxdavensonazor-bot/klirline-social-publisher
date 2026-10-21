@@ -158,7 +158,9 @@ async function createPortalSession(org, env) {
   if (!isStripeUrl(portal.url, "https://billing.stripe.com")) throw httpError("billing-portal-url-invalid", 502);
   return portal.url;
 }
-async function requireActiveBilling(db, user) {
+async function requireActiveBilling(db, user, env) {
+  // Klirline's production workspace is internal and does not require customer billing.
+  if (env.INTERNAL_MODE === "true") return;
   const org = await db.prepare("SELECT billing_status,billing_period_end FROM organizations WHERE id=?").bind(user.org_id).first();
   if (!org || !["active", "trialing"].includes(org.billing_status)) throw httpError("active-subscription-required", 402);
   if (org.billing_status === "active" && org.billing_period_end && Date.parse(org.billing_period_end) <= Date.now()) throw httpError("active-subscription-required", 402);
@@ -667,7 +669,8 @@ async function handle(request, env, ctx) {
   }
   if (url.pathname === "/api/public-config" && request.method === "GET") {
     const users = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
-    return json({ publicSignupEnabled: env.ALLOW_PUBLIC_SIGNUP === "true" && Boolean(users?.count) && billingSetupReady(env) }, 200, secureHeaders(cors));
+    const internalMode = env.INTERNAL_MODE === "true";
+    return json({ internalMode, publicSignupEnabled: !internalMode && env.ALLOW_PUBLIC_SIGNUP === "true" && Boolean(users?.count) && billingSetupReady(env) }, 200, secureHeaders(cors));
   }
   if (url.pathname === "/api/providers" && request.method === "GET") return json(providerList(env), 200, secureHeaders(cors));
   if (url.pathname === "/api/auth/bootstrap" && request.method === "GET") { const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first(); return json({ needsAdmin: !row?.count }, 200, secureHeaders(cors)); }
@@ -685,7 +688,7 @@ async function handle(request, env, ctx) {
     const token=await makeSession(user,env); return json({ user:userMetadata(user), first:true },201,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
   }
   if (url.pathname === "/api/auth/signup" && request.method === "POST") {
-    if (env.ALLOW_PUBLIC_SIGNUP !== "true" || !billingSetupReady(env)) throw httpError("customer-signup-not-configured", 503);
+    if (env.INTERNAL_MODE === "true" || env.ALLOW_PUBLIC_SIGNUP !== "true" || !billingSetupReady(env)) throw httpError("customer-signup-not-configured", 503);
     const existingUsers = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
     if (!existingUsers?.count) throw httpError("bootstrap-admin-required", 503);
     const body = await readJson(request);
@@ -735,12 +738,14 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/auth/logout" && request.method === "POST") return json({ok:true},200,secureHeaders({...cors,"Set-Cookie":clearCookie()}));
   if (url.pathname === "/api/billing" && request.method === "GET") {
     const user = await authenticate(request, env, env.DB);
-    const org = await env.DB.prepare("SELECT billing_status,billing_period_end,stripe_customer_id,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
     const usage = await billingUsage(env.DB, user, env);
+    if (env.INTERNAL_MODE === "true") return json({ status: "internal", canPublish: true, customerPortalAvailable: false, usage }, 200, secureHeaders(cors));
+    const org = await env.DB.prepare("SELECT billing_status,billing_period_end,stripe_customer_id,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
     const expired = org?.billing_status === "active" && org.billing_period_end && Date.parse(org.billing_period_end) <= Date.now();
     return json({ status: expired ? "expired" : org?.billing_status || "inactive", canPublish: ["active", "trialing"].includes(org?.billing_status) && !expired, customerPortalAvailable: Boolean(org?.stripe_customer_id), usage }, 200, secureHeaders(cors));
   }
   if (url.pathname === "/api/billing/checkout" && request.method === "POST") {
+    if (env.INTERNAL_MODE === "true") throw httpError("billing-disabled-for-internal-workspace", 404);
     const user = await authenticate(request, env, env.DB, ["admin"]);
     const org = await env.DB.prepare("SELECT id,name,stripe_customer_id,billing_status FROM organizations WHERE id=?").bind(user.org_id).first();
     if (!org) throw httpError("organization-not-found", 404);
@@ -748,6 +753,7 @@ async function handle(request, env, ctx) {
     return json({ checkoutUrl: await createCheckoutSession(org, user, env) }, 200, secureHeaders(cors));
   }
   if (url.pathname === "/api/billing/portal" && request.method === "POST") {
+    if (env.INTERNAL_MODE === "true") throw httpError("billing-disabled-for-internal-workspace", 404);
     const user = await authenticate(request, env, env.DB, ["admin"]);
     const org = await env.DB.prepare("SELECT id,stripe_customer_id FROM organizations WHERE id=?").bind(user.org_id).first();
     return json({ portalUrl: await createPortalSession(org, env) }, 200, secureHeaders(cors));
@@ -766,9 +772,9 @@ async function handle(request, env, ctx) {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT * FROM posts WHERE user_id=? ORDER BY created_at DESC LIMIT 200").bind(user.id).all();
     return json((rows.results||[]).map((r)=>({id:r.id,authorId:user.id,text:r.text,mediaId:r.media_id,results:JSON.parse(r.results_json),createdAt:r.created_at})),200,secureHeaders(cors));
   }
-  if (url.pathname === "/api/publish" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user); return json(await accountPublish(request,user,env,env.DB),200,secureHeaders(cors)); }
+  if (url.pathname === "/api/publish" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user,env); return json(await accountPublish(request,user,env,env.DB),200,secureHeaders(cors)); }
   if (url.pathname === "/api/media" && request.method === "POST") {
-    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user); const form=await request.formData(); const file=form.get("file");
+    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user,env); const form=await request.formData(); const file=form.get("file");
     if (!(file instanceof File)) throw httpError("no-file"); if (file.size > MAX_MEDIA_BYTES) throw httpError("file-too-large",413);
     const bytes=new Uint8Array(await file.arrayBuffer()); const mime=sniffImage(bytes); if (!mime) throw httpError("unsupported-or-invalid-image");
     const id=randomId(); const key=`${user.id}/${id}`; const created=nowIso(); const expires=new Date(Date.now()+30*86400000).toISOString();
@@ -777,7 +783,7 @@ async function handle(request, env, ctx) {
     catch (error) { await env.MEDIA.delete(key); throw error; }
     return json({id,url:`${env.PUBLIC_BASE_URL}/media/${encodeURIComponent(id)}`,mime,size:bytes.byteLength},201,secureHeaders(cors));
   }
-  if (url.pathname === "/api/scheduled" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user); return json(await createSchedule(request,user,env,env.DB),200,secureHeaders(cors)); }
+  if (url.pathname === "/api/scheduled" && request.method === "POST") { const user=await authenticate(request,env,env.DB,["admin","redacteur"]); await requireActiveBilling(env.DB,user,env); return json(await createSchedule(request,user,env,env.DB),200,secureHeaders(cors)); }
   if (url.pathname === "/api/scheduled" && request.method === "GET") {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT * FROM scheduled_posts WHERE user_id=? ORDER BY run_at DESC LIMIT 200").bind(user.id).all();
     return json(await Promise.all((rows.results||[]).map((row)=>scheduleView(env.DB,row))),200,secureHeaders(cors));
@@ -796,7 +802,7 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/account" && request.method === "DELETE") {
     const user=await authenticate(request,env,env.DB); const body=await readJson(request); const row=await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(user.id).first();
     if (!row || !same(await passwordHash(String(body.password||""),row.password_salt),row.password_hash)) throw httpError("invalid-credentials",401);
-    const org=await env.DB.prepare("SELECT billing_status,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
+    const org=env.INTERNAL_MODE === "true" ? null : await env.DB.prepare("SELECT billing_status,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
     if (org?.stripe_subscription_id && !["canceled","incomplete_expired"].includes(org.billing_status)) throw httpError("cancel-subscription-before-deleting-account",409);
     const active=await env.DB.prepare("SELECT COUNT(*) AS count FROM scheduled_posts WHERE user_id=? AND status='processing'").bind(user.id).first(); if (active?.count) throw httpError("scheduled-publication-in-progress",409);
     const objects=await env.DB.prepare("SELECT object_key FROM media WHERE user_id=?").bind(user.id).all(); for (const item of objects.results||[]) await env.MEDIA.delete(item.object_key);
