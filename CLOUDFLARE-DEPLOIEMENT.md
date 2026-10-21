@@ -21,6 +21,20 @@ Le backend Express de `klirline-social-backend/` reste une référence locale et
 
 Depuis `cloudflare-api/`, préparez les ressources dans votre compte Cloudflare :
 
+### Lier GitHub à un Worker sans remplacer le site existant
+
+Le site public et l’API sont deux projets de déploiement distincts. Le Worker du site s’appelle `klirline-social-publisher`; la configuration de l’API déclare `klirline-social-api`. **Ne changez pas la racine ni la commande du Worker existant pour pointer vers `cloudflare-api/`** : cela pourrait remplacer le service qui sert le site.
+
+Pour connecter le dépôt à l’API, créez un nouveau service **Workers Builds** dans Cloudflare, relié au même dépôt GitHub, avec ces paramètres :
+
+- Root directory : `cloudflare-api`
+- Build command : vide (ou `npm install` si le tableau de bord exige une commande)
+- Deploy command : `npx wrangler deploy`
+- Nom du Worker : `klirline-social-api`, identique à `name` dans `wrangler.jsonc`
+- Branche de production : la branche choisie pour les mises en production; utilisez la branche de travail seulement si vous voulez explicitement y déployer
+
+Configurez les secrets et ressources Cloudflare pour ce nouveau Worker avant le premier déploiement. Laissez le projet Pages qui sert le frontend à la racine (`/`) avec son répertoire de sortie statique; il ne doit pas publier le Worker API. Après déploiement, mettez l’URL HTTPS de l’API dans **Préférences → Backend et compte** sur le site, puis vérifiez `/api/health`. Les noms exacts des champs du tableau de bord peuvent évoluer; contrôlez la configuration avant d’enregistrer. Documentation Cloudflare : [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) et [troubleshooting](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/).
+
 1. Installer les outils du projet avec `npm install`.
 2. Créer la base D1 : `npx wrangler d1 create klirline-social`. Copier l’identifiant retourné dans `wrangler.jsonc` à la place de `REPLACE_WITH_D1_DATABASE_ID`.
 3. Créer le bucket R2 : `npx wrangler r2 bucket create klirline-social-media`.

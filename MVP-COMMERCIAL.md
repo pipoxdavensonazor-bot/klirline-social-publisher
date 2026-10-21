@@ -18,7 +18,7 @@ Ne pas commercialiser la version actuelle comme un outil de publication automati
 
 ## Canaux de lancement recommandés
 
-Commencer avec **Instagram professionnel** et **LinkedIn Page d’entreprise**. Ajouter **Facebook Page** seulement après confirmation que Klirline possède bien une Page publiable et non uniquement le profil Facebook `/people/` fourni.
+Commencer avec **Instagram professionnel** et **LinkedIn Page d’entreprise**. Ajouter **Facebook Page** seulement après confirmation que Klirline possède bien une Page publiable. Le lien fourni (`facebook.com/profile.php?id=61589921400915`) ne permet pas à lui seul de confirmer qu’il s’agit d’une Page professionnelle; le site Facebook n’a pas pu être consulté publiquement pendant cette vérification. Confirmer le type du compte dans Meta Business Suite avant d’activer Facebook.
 
 Cette sélection concentre le premier parcours sur les comptes d’entreprise et évite de promettre neuf intégrations dont les permissions et formats diffèrent. Elle reste conditionnée par les comptes développeur et les autorisations de chaque fournisseur. LinkedIn peut imposer un accès Community Management approuvé. Instagram doit être un compte professionnel et obtenir les permissions Meta appropriées.
 
@@ -51,7 +51,7 @@ Ce prix vise un outil encore étroit, sans analytics, vidéo, approbations d’�
 Le MVP peut passer au développement commercial quand ces points sont confirmés :
 
 - Les comptes Klirline sont des comptes professionnels compatibles et leurs administrateurs peuvent accorder le consentement OAuth.
-- La destination Facebook est une Page d’entreprise; le lien fourni (`facebook.com/people/...`) ne confirme pas une Page et doit être vérifié dans Meta Business Suite; sinon Facebook est retiré du lancement.
+- La destination Facebook est une Page d’entreprise; le lien fourni (`facebook.com/profile.php?id=61589921400915`) n’établit pas son type. Le vérifier dans Meta Business Suite; sinon retirer Facebook du lancement.
 - La première version est limitée au texte et à une image, avec publication immédiate et programmation.
 - Les autorisations développeur et les revues nécessaires sont identifiées pour Instagram et LinkedIn; aucune intégration n’est annoncée comme publique avant son approbation.
 - La page d’accueil décrit exactement les réseaux et fonctions qui ont été testés en production.
