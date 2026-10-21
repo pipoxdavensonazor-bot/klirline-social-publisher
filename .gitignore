@@ -1,0 +1,18 @@
+# Secrets and local runtime data
+.env
+.env.*
+!.env.example
+klirline-social-backend/.env
+klirline-social-backend/data/
+klirline-social-backend/uploads/
+
+# Dependencies and generated files
+node_modules/
+klirline-social-backend/node_modules/
+dist/
+.wrangler/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.log
