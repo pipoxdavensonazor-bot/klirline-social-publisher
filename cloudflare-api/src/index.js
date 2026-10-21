@@ -7,6 +7,7 @@ const PROVIDERS = {
 };
 const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin"];
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
+const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const COOKIE = "klirline_session";
 const OAUTH_COOKIE = "klirline_oauth_state";
 
@@ -119,8 +120,27 @@ async function openToken(row, env) {
 }
 async function readJson(request) {
   const length = Number(request.headers.get("Content-Length") || 0);
-  if (length > 2 * 1024 * 1024) throw httpError("request-too-large", 413);
-  try { return await request.json(); } catch { throw httpError("invalid-json", 400); }
+  if (length > MAX_JSON_BYTES) throw httpError("request-too-large", 413);
+  if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get("Content-Type") || "")) throw httpError("json-content-type-required", 415);
+  if (!request.body) throw httpError("invalid-json", 400);
+  const reader = request.body.getReader(); const chunks = []; let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_JSON_BYTES) { await reader.cancel(); throw httpError("request-too-large", 413); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const bytes = new Uint8Array(total); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try {
+    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("json-object-required");
+    return value;
+  }
+  catch { throw httpError("invalid-json", 400); }
 }
 function userMetadata(row) { return { id: row.id, email: row.email, role: row.role, org: row.org_id }; }
 async function requestFingerprint(userId, kind, data) {

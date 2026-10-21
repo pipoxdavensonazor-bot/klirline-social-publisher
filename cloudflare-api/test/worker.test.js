@@ -127,6 +127,20 @@ test("write requests reject missing origin and CSRF marker", async () => {
   assert.equal(response.status, 403);
 });
 
+test("JSON request limit is enforced when Content-Length is absent", async () => {
+  const ctx = fixture();
+  const body = JSON.stringify({ email: "owner@klirline.ca", password: "x".repeat(2 * 1024 * 1024) });
+  const request = new Request("https://api.test/api/auth/register", {
+    method: "POST",
+    headers: { Origin: "https://app.test", "Content-Type": "application/json", "X-Klirline-Request": "1" },
+    body
+  });
+  assert.equal(request.headers.get("Content-Length"), null);
+  const response = await worker.fetch(request, ctx.env, { waitUntil() {} });
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error, "request-too-large");
+});
+
 test("health endpoint reports missing production bindings and secrets", async () => {
   const healthy = fixture();
   assert.equal((await healthy.request("/api/health")).status, 200);
