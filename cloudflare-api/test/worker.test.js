@@ -584,3 +584,18 @@ test("publication adapters send image posts to Instagram, Facebook Page, LinkedI
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Bluesky exposes public OAuth metadata and rejects unsupported handle input", async () => {
+  const ctx = fixture();
+  const metadataResponse = await ctx.request("/oauth/bluesky/client-metadata.json");
+  assert.equal(metadataResponse.status, 200);
+  const metadata = await metadataResponse.json();
+  assert.equal(metadata.client_id, "https://api.test/oauth/bluesky/client-metadata.json");
+  assert.equal(metadata.dpop_bound_access_tokens, true);
+  assert.match(metadata.scope, /repo:app\.bsky\.feed\.post\?action=create/);
+
+  const cookie = await bootstrap(ctx);
+  const response = await ctx.request("/oauth/bluesky/start", "POST", { handle: "not-a-bsky-handle.example" }, { Cookie: cookie });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "bluesky-handle-must-be-bsky-social");
+});

@@ -15,7 +15,7 @@
 
 ## Fonctionnalités actuellement disponibles
 
-Le pilote API permet la publication et la programmation vers Instagram professionnel, une Page Facebook, une Page LinkedIn, Threads, X et Pinterest, sous réserve des accès développeur et autorisations réels. X accepte texte et images JPEG/PNG jusqu’à 5 Mo; Pinterest publie une image dans le tableau choisi par l’administrateur. Les essais locaux utilisent des réponses fournisseur simulées; les publications réelles doivent être validées sur les comptes Klirline. TikTok et Bluesky ne sont pas implémentés dans le Worker; Twitch n’est pas un canal de publication générique. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée. Si une programmation affiche que le résultat de l’envoi est incertain après une interruption du Worker, vérifiez d’abord le compte social concerné. Ne relancez pas avant d’avoir vérifié si le réseau a déjà créé la publication, afin d’éviter un doublon.
+Le pilote API permet la publication et la programmation vers Instagram professionnel, une Page Facebook, une Page LinkedIn, Threads, X, Pinterest et Bluesky, sous réserve des accès développeur et autorisations réels. X accepte texte et images JPEG/PNG jusqu’à 5 Mo; Pinterest publie une image dans le tableau choisi par l’administrateur. Bluesky accepte texte et une image JPEG/PNG de 2 Mo maximum, avec texte alternatif. Les essais locaux utilisent des réponses fournisseur simulées; les publications réelles doivent être validées sur les comptes Klirline. TikTok reste manuel conformément aux limites de publication d’applications internes; Twitch n’est pas un canal de publication générique. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée. Si une programmation affiche que le résultat de l’envoi est incertain après une interruption du Worker, vérifiez d’abord le compte social concerné. Ne relancez pas avant d’avoir vérifié si le réseau a déjà créé la publication, afin d’éviter un doublon.
 
 Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 publications par mois (`WORKSPACE_MAX_CONNECTED_ACCOUNTS` et `WORKSPACE_MONTHLY_PUBLICATION_CAP`). Ce sont des garde-fous techniques configurables, pas des forfaits ou des limites de facturation.
 
@@ -38,7 +38,7 @@ Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 pub
 
 ## Écarts à traiter avant un usage régulier par toute l’équipe
 
-- Appliquer toutes les migrations jusqu’à 0012 avant d’utiliser les brouillons partagés, les métadonnées de campagne et la barrière d’approbation. Vérifier `/api/health` après migration.
+- Appliquer toutes les migrations jusqu’à 0014 avant d’utiliser les brouillons partagés, les métadonnées de campagne, les sessions OAuth Bluesky et les textes alternatifs. Vérifier `/api/health` après migration.
 - Les brouillons partagés prennent en charge un pays, une langue, une destination et un fuseau horaire par variante; créer une variante distincte pour chaque adaptation pays/langue.
 - Le Worker applique la barrière d’approbation seulement si `REQUIRE_APPROVED_DRAFTS=true`; garder cette valeur activée dans les environnements internes et vérifier sa valeur dans Cloudflare avant le lancement des campagnes.
 - Valider les accès et publier de vrais essais contrôlés sur chaque réseau que Klirline prévoit d’utiliser; les liens de profil seuls ne donnent aucun droit de publication.

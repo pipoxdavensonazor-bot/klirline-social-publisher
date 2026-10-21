@@ -1,18 +1,21 @@
 import { xTextMetrics } from "./x-text.js";
+import { Agent } from "@atproto/api";
+import { NodeOAuthClient } from "@atproto/oauth-client-node";
 
 const PROVIDERS = {
   instagram: { name: "Instagram", limit: 2200, scopes: ["instagram_business_basic", "instagram_business_content_publish"] },
   facebook: { name: "Facebook Page", limit: 63206, scopes: ["pages_show_list", "pages_manage_posts", "pages_read_engagement"] },
   linkedin: { name: "LinkedIn Page", limit: 3000, scopes: ["openid", "profile", "r_organization_admin", "w_organization_social"] },
   x: { name: "X", limit: 280, scopes: ["tweet.read", "tweet.write", "users.read", "offline.access", "media.write"] }, threads: { name: "Threads", limit: 500, scopes: ["threads_basic", "threads_content_publish"] }, pinterest: { name: "Pinterest", limit: 800, scopes: ["boards:read", "pins:write"] },
-  bluesky: { name: "Bluesky", limit: 300 }, tiktok: { name: "TikTok", limit: 2200 }, twitch: { name: "Twitch", limit: 500 }
+  bluesky: { name: "Bluesky", limit: 300, scopes: ["atproto", "repo:app.bsky.feed.post?action=create", "blob:*/*"] }, tiktok: { name: "TikTok", limit: 2200 }, twitch: { name: "Twitch", limit: 500 }
 };
-const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"];
-const REQUIRED_SCHEMA_TABLES = ["users", "oauth_states", "connections", "media", "posts", "scheduled_posts", "scheduled_results", "organizations", "usage_counters", "auth_limits", "team_invitations", "audit_events", "campaign_drafts"];
+const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads", "x", "pinterest", "bluesky"];
+const REQUIRED_SCHEMA_TABLES = ["users", "oauth_states", "connections", "media", "posts", "scheduled_posts", "scheduled_results", "organizations", "usage_counters", "auth_limits", "team_invitations", "audit_events", "campaign_drafts", "atproto_oauth_states", "atproto_oauth_sessions", "atproto_session_locks"];
 const REQUIRED_SCHEMA_COLUMNS = [
   ["campaign_drafts", "publication_state"],
   ["posts", "campaign_draft_id"],
-  ["scheduled_posts", "campaign_draft_id"]
+  ["scheduled_posts", "campaign_draft_id"],
+  ["media", "alt_text"]
 ];
 // Internal operational ceiling, not a subscription entitlement. Keep it high
 // enough for regional and brand accounts while preventing accidental abuse.
@@ -135,6 +138,11 @@ function validateTextLength(provider, text) {
     if (!metrics.valid) throw httpError(metrics.weightedLength > PROVIDERS.x.limit ? "too-long:x" : "invalid-x-text");
     return;
   }
+  if (provider === "bluesky") {
+    const count = [...new Intl.Segmenter("en", { granularity: "grapheme" }).segment(text)].length;
+    if (count > PROVIDERS.bluesky.limit) throw httpError("too-long:bluesky");
+    return;
+  }
   if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`);
 }
 function usagePeriodKey() {
@@ -177,6 +185,84 @@ async function openToken(row, env) {
   // Rows written by earlier versions contain only the access token.
   return { accessToken: value, refreshToken: null };
 }
+async function sealJson(value, env) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = await crypto.subtle.encrypt({ name: "AES-GCM", iv, tagLength: 128 }, await encryptionKey(env), new TextEncoder().encode(JSON.stringify(value)));
+  return { ciphertext: b64u(sealed), iv: b64u(iv) };
+}
+async function openJson(ciphertext, iv, env) {
+  const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64u(iv), tagLength: 128 }, await encryptionKey(env), unb64u(ciphertext));
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(clear));
+}
+async function storeKeyHash(value) {
+  return b64u(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value))));
+}
+function blueskyClientMetadata(env) {
+  const base = String(env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+  const frontend = String(env.FRONTEND_ORIGIN || "").split(",")[0].trim().replace(/\/+$/, "");
+  const apiUrl = new URL(base);
+  const frontendUrl = new URL(frontend);
+  if (apiUrl.protocol !== "https:" || frontendUrl.protocol !== "https:") throw httpError("bluesky-requires-https-domains", 503);
+  const clientId = `${base}/oauth/bluesky/client-metadata.json`;
+  return {
+    client_id: clientId,
+    client_name: "Klirline Social",
+    client_uri: base,
+    tos_uri: `${frontend}/terms.html`,
+    policy_uri: `${frontend}/privacy.html`,
+    redirect_uris: [`${base}/oauth/bluesky/callback`],
+    grant_types: ["authorization_code", "refresh_token"],
+    scope: "atproto repo:app.bsky.feed.post?action=create blob:*/*",
+    response_types: ["code"],
+    application_type: "web",
+    token_endpoint_auth_method: "none",
+    dpop_bound_access_tokens: true
+  };
+}
+function createBlueskyOAuthClient(env, db, userId) {
+  const stateStore = {
+    async set(key, value) {
+      const hash = await storeKeyHash(key); const sealed = await sealJson(value, env); const now = nowIso();
+      await db.prepare(`INSERT INTO atproto_oauth_states(state_hash,user_id,state_ciphertext,state_iv,created_at,expires_at) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(state_hash) DO UPDATE SET user_id=excluded.user_id,state_ciphertext=excluded.state_ciphertext,state_iv=excluded.state_iv,created_at=excluded.created_at,expires_at=excluded.expires_at`)
+        .bind(hash, userId, sealed.ciphertext, sealed.iv, now, new Date(Date.now() + 60 * 60 * 1000).toISOString()).run();
+    },
+    async get(key) {
+      const hash = await storeKeyHash(key);
+      const row = await db.prepare("SELECT state_ciphertext,state_iv FROM atproto_oauth_states WHERE state_hash=? AND user_id=? AND expires_at>?").bind(hash, userId, nowIso()).first();
+      return row ? openJson(row.state_ciphertext, row.state_iv, env) : undefined;
+    },
+    async del(key) { await db.prepare("DELETE FROM atproto_oauth_states WHERE state_hash=? AND user_id=?").bind(await storeKeyHash(key), userId).run(); }
+  };
+  const sessionStore = {
+    async set(did, value) {
+      const sealed = await sealJson(value, env); const now = nowIso();
+      await db.prepare(`INSERT INTO atproto_oauth_sessions(did,user_id,session_ciphertext,session_iv,created_at,updated_at) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(did) DO UPDATE SET user_id=excluded.user_id,session_ciphertext=excluded.session_ciphertext,session_iv=excluded.session_iv,updated_at=excluded.updated_at`)
+        .bind(did, userId, sealed.ciphertext, sealed.iv, now, now).run();
+    },
+    async get(did) {
+      const row = await db.prepare("SELECT session_ciphertext,session_iv FROM atproto_oauth_sessions WHERE did=? AND user_id=?").bind(did, userId).first();
+      return row ? openJson(row.session_ciphertext, row.session_iv, env) : undefined;
+    },
+    async del(did) { await db.prepare("DELETE FROM atproto_oauth_sessions WHERE did=? AND user_id=?").bind(did, userId).run(); }
+  };
+  const requestLock = async (name, fn) => {
+    const lockKey = await storeKeyHash(name); let leaseUntil; let acquired = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const now = new Date(); leaseUntil = new Date(now.getTime() + 45000).toISOString();
+      const row = await db.prepare(`INSERT INTO atproto_session_locks(lock_key,lease_until) VALUES(?,?)
+        ON CONFLICT(lock_key) DO UPDATE SET lease_until=excluded.lease_until WHERE atproto_session_locks.lease_until<? RETURNING lock_key`)
+        .bind(lockKey, leaseUntil, now.toISOString()).first();
+      if (row) { acquired = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!acquired) throw httpError("bluesky-session-busy-retry", 503);
+    try { return await fn(); }
+    finally { await db.prepare("DELETE FROM atproto_session_locks WHERE lock_key=? AND lease_until=?").bind(lockKey, leaseUntil).run(); }
+  };
+  return new NodeOAuthClient({ clientMetadata: blueskyClientMetadata(env), stateStore, sessionStore, requestLock });
+}
 async function readJson(request) {
   const length = Number(request.headers.get("Content-Length") || 0);
   if (length > MAX_JSON_BYTES) throw httpError("request-too-large", 413);
@@ -218,7 +304,8 @@ function providerStatus(id, env) {
     linkedin: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_REDIRECT_URI", "LINKEDIN_ORGANIZATION_URN", "LINKEDIN_VERSION"],
     threads: ["THREADS_APP_ID", "THREADS_APP_SECRET", "THREADS_REDIRECT_URI"],
     x: ["X_CLIENT_ID", "X_CLIENT_SECRET", "X_REDIRECT_URI"],
-    pinterest: ["PINTEREST_APP_ID", "PINTEREST_APP_SECRET", "PINTEREST_REDIRECT_URI"]
+    pinterest: ["PINTEREST_APP_ID", "PINTEREST_APP_SECRET", "PINTEREST_REDIRECT_URI"],
+    bluesky: ["PUBLIC_BASE_URL", "FRONTEND_ORIGIN"]
   }[id];
   if (!keys) return { configured: "out-of-scope", available: false };
   return { configured: keys.every((key) => Boolean(env[key])) ? "ready" : "missing-credentials", available: true };
@@ -269,6 +356,44 @@ async function oauthStart(provider, user, env, db) {
   await db.prepare("INSERT INTO oauth_states (state_hash,user_id,provider,verifier,created_at,expires_at) VALUES (?,?,?,?,?,?)")
     .bind(b64u(hash), user.id, provider, verifier, nowIso(), new Date(Date.now() + 10 * 60000).toISOString()).run();
   return { location: `${cfg.authorize}?${params}`, state };
+}
+async function blueskyOauthStart(user, handle, env, db) {
+  const normalized = String(handle || "").trim().replace(/^@/, "").toLowerCase();
+  if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+bsky\.social$/.test(normalized)) throw httpError("bluesky-handle-must-be-bsky-social", 400);
+  const current = await db.prepare("SELECT id FROM connections WHERE provider='bluesky' AND user_id IN (SELECT id FROM users WHERE org_id=?) LIMIT 1").bind(user.org_id).first();
+  if (!current) {
+    const count = await db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id IN (SELECT id FROM users WHERE org_id=?)").bind(user.org_id).first();
+    if (count?.count >= workspaceLimit(env, "WORKSPACE_MAX_CONNECTED_ACCOUNTS", DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached", 429);
+  }
+  const client = createBlueskyOAuthClient(env, db, user.id);
+  const location = await client.authorize(normalized, { state: randomId(24), ui_locales: "fr-CA fr en" });
+  return { location: String(location) };
+}
+async function completeBlueskyOAuth(request, env, db) {
+  const url = new URL(request.url); const stateKey = url.searchParams.get("state");
+  if (!stateKey) throw httpError("bad-oauth-callback", 400);
+  const stateHash = await storeKeyHash(stateKey);
+  const stateRow = await db.prepare("SELECT user_id,state_ciphertext,state_iv FROM atproto_oauth_states WHERE state_hash=? AND expires_at>?").bind(stateHash, nowIso()).first();
+  if (!stateRow) throw httpError("oauth-state-invalid-or-expired", 400);
+  const user = await db.prepare("SELECT id,org_id,is_active FROM users WHERE id=?").bind(stateRow.user_id).first();
+  if (!user || user.is_active === 0) throw httpError("account-disabled", 401);
+  const expectedAppState = (await openJson(stateRow.state_ciphertext, stateRow.state_iv, env)).appState;
+  const client = createBlueskyOAuthClient(env, db, user.id);
+  const callback = await client.callback(url.searchParams);
+  if (!callback.session?.did || callback.state !== expectedAppState) throw httpError("bluesky-oauth-state-mismatch", 400);
+  const profileUrl = new URL("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile");
+  profileUrl.searchParams.set("actor", callback.session.did);
+  const profile = await graphJson(profileUrl, null).catch(() => ({}));
+  const handle = String(profile.handle || "");
+  if (!handle.endsWith(".bsky.social")) throw httpError("bluesky-account-handle-not-supported", 400);
+  const account = { id: callback.session.did, did: callback.session.did, handle, label: `@${handle}`, displayName: String(profile.displayName || "") };
+  const sealed = await sealToken(JSON.stringify({ accessToken: `atproto-session:${account.did}`, refreshToken: null }), env);
+  const id = randomId();
+  await db.prepare(`INSERT INTO connections(id,user_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,expires_at,created_at)
+    VALUES(?,?,'bluesky',?,?,?,?,?,?,NULL,?) ON CONFLICT(user_id,provider) DO UPDATE SET id=excluded.id,account_id=excluded.account_id,account_label=excluded.account_label,account_json=excluded.account_json,scopes_json=excluded.scopes_json,token_ciphertext=excluded.token_ciphertext,token_iv=excluded.token_iv,expires_at=NULL,created_at=excluded.created_at`)
+    .bind(id, user.id, account.id, account.label, JSON.stringify(account), JSON.stringify(PROVIDERS.bluesky.scopes), sealed.data, sealed.iv, nowIso()).run();
+  await auditEvent(db,user.org_id,user.id,"social.connected","bluesky",{accountLabel:account.label});
+  return "bluesky";
 }
 async function exchangeOAuth(provider, code, env, verifier = null) {
   const cfg = providerEnv(provider, env);
@@ -371,6 +496,7 @@ async function getConnection(db, userId, provider) {
   return row;
 }
 async function currentAccessToken(provider, connection, env) {
+  if (provider === "bluesky") throw httpError("bluesky-session-required", 409);
   const bundle = await openToken(connection, env);
   const expiresAt = connection.expires_at ? Date.parse(connection.expires_at) : NaN;
   if (!Number.isFinite(expiresAt) || expiresAt > Date.now() + 5 * 60 * 1000) return bundle.accessToken;
@@ -415,6 +541,23 @@ async function getMedia(db, id, userId) {
 }
 async function publishOne(provider, connection, text, media, env) {
   if (!LAUNCH_PROVIDERS.includes(provider)) return { provider, status: "action-required", message: "provider-out-of-scope-for-mvp" };
+  if (provider === "bluesky") {
+    if (media && (!media.bytes || media.bytes.byteLength > 2 * 1024 * 1024 || !["image/jpeg", "image/png"].includes(media.mime))) return { provider, status: "action-required", message: "bluesky-image-requires-jpeg-or-png-under-2mb" };
+    if (media && !String(media.alt_text || "").trim()) return { provider, status: "action-required", message: "bluesky-image-alt-text-required" };
+    try {
+      const client = createBlueskyOAuthClient(env, env.DB, connection.user_id);
+      const session = await client.restore(connection.account_id);
+      const agent = new Agent(session);
+      const embed = media ? {
+        $type: "app.bsky.embed.images",
+      images: [{ alt: media.alt_text || "", image: (await agent.uploadBlob(media.bytes, { encoding: media.mime })).data.blob }]
+      } : undefined;
+      const created = await agent.post({ text, ...(embed ? { embed } : {}) });
+      return { provider, status: "published", postId: created.uri, message: "ok" };
+    } catch (error) {
+      return { provider, status: "failed", message: String(error.message || error).slice(0, 240), retryable: !error.status || error.status === 502 };
+    }
+  }
   let access;
   try { access = await currentAccessToken(provider, connection, env); } catch (error) {
     if (String(error?.message || "").startsWith("reconnect-required")) return { provider, status: "action-required", message: "reconnect-required-token-expired" };
@@ -686,6 +829,8 @@ async function processDue(env, db) {
   for (const item of expired.results || []) await env.MEDIA.delete(item.object_key);
   await db.prepare("DELETE FROM media WHERE expires_at<=?").bind(now).run();
   await db.prepare("DELETE FROM oauth_states WHERE expires_at<=?").bind(now).run();
+  await db.prepare("DELETE FROM atproto_oauth_states WHERE expires_at<=?").bind(now).run();
+  await db.prepare("DELETE FROM atproto_session_locks WHERE lease_until<=?").bind(now).run();
   await db.prepare("DELETE FROM auth_limits WHERE window_started<?").bind(Date.now() - 15 * 60 * 1000).run();
   await db.prepare("DELETE FROM usage_counters WHERE period_key<?").bind(new Date(Date.now() - 400 * 86400000).toISOString()).run();
 }
@@ -755,6 +900,7 @@ async function handle(request, env, ctx) {
     const internalMode = env.INTERNAL_MODE === "true";
     return json({ internalMode, publicSignupEnabled: false, requireApprovedDrafts:env.REQUIRE_APPROVED_DRAFTS==="true" }, 200, secureHeaders(cors));
   }
+  if (url.pathname === "/oauth/bluesky/client-metadata.json" && request.method === "GET") return json(blueskyClientMetadata(env), 200, secureHeaders(cors));
   if (url.pathname === "/api/providers" && request.method === "GET") return json(providerList(env), 200, secureHeaders(cors));
   if (url.pathname === "/api/auth/bootstrap" && request.method === "GET") { const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first(); return json({ needsAdmin: !row?.count }, 200, secureHeaders(cors)); }
   if (url.pathname === "/api/auth/register" && request.method === "POST") {
@@ -876,7 +1022,15 @@ async function handle(request, env, ctx) {
     requireInternalWorkspace(env);
     const user = await authenticate(request,env,env.DB);
     return json({status:"internal",usage:await workspaceUsage(env.DB,user,env)},200,secureHeaders(cors));
-  }  if (url.pathname.startsWith("/oauth/") && url.pathname.endsWith("/start") && request.method === "GET") { const user=await authenticate(request,env,env.DB,["admin"]); const result=await oauthStart(url.pathname.split("/")[2],user,env,env.DB); return new Response(null,{status:302,headers:{Location:result.location,"Set-Cookie":oauthCookie(result.state),"Cache-Control":"no-store"}}); }
+  }  if (url.pathname === "/oauth/bluesky/start" && request.method === "POST") {
+    const user=await authenticate(request,env,env.DB,["admin"]); const body=await readJson(request); const result=await blueskyOauthStart(user,body.handle,env,env.DB);
+    return json({location:result.location},200,secureHeaders(cors));
+  }
+  if (url.pathname === "/oauth/bluesky/callback" && request.method === "GET") {
+    try { await completeBlueskyOAuth(request,env,env.DB); return new Response(null,{status:302,headers:{Location:`${allowedOrigins(env)[0]}#oauth-ok=bluesky`,"Cache-Control":"no-store"}}); }
+    catch (error) { return new Response(`OAuth callback: ${String(error.message||error)}`,{status:error.status||500,headers:{"content-type":"text/plain; charset=utf-8","Cache-Control":"no-store"}}); }
+  }
+  if (url.pathname.startsWith("/oauth/") && url.pathname.endsWith("/start") && request.method === "GET") { const user=await authenticate(request,env,env.DB,["admin"]); const result=await oauthStart(url.pathname.split("/")[2],user,env,env.DB); return new Response(null,{status:302,headers:{Location:result.location,"Set-Cookie":oauthCookie(result.state),"Cache-Control":"no-store"}}); }
   if (url.pathname.startsWith("/oauth/") && url.pathname.endsWith("/callback") && request.method === "GET") {
     try { await completeOAuth(request,env,env.DB); return new Response(null,{status:302,headers:{Location:`${allowedOrigins(env)[0]}#oauth-ok=${encodeURIComponent(url.pathname.split("/")[2])}`,"Set-Cookie":clearOAuthCookie(),"Cache-Control":"no-store"}}); }
     catch (error) { return new Response(`OAuth callback: ${String(error.message||error)}`,{status:error.status||500,headers:{"content-type":"text/plain; charset=utf-8","Cache-Control":"no-store","Set-Cookie":clearOAuthCookie()}}); }
@@ -959,10 +1113,11 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/media" && request.method === "POST") {
     const user=await authenticate(request,env,env.DB,["admin","redacteur"]); requireInternalWorkspace(env); const form=await request.formData(); const file=form.get("file");
     if (!(file instanceof File)) throw httpError("no-file"); if (file.size > MAX_MEDIA_BYTES) throw httpError("file-too-large",413);
+    const altText=String(form.get("altText")||"").trim(); if(altText.length>1000) throw httpError("invalid-image-alt-text");
     const bytes=new Uint8Array(await file.arrayBuffer()); const mime=sniffImage(bytes); if (!mime) throw httpError("unsupported-or-invalid-image");
     const id=randomId(); const key=`${user.id}/${id}`; const created=nowIso(); const expires=new Date(Date.now()+30*86400000).toISOString();
     await env.MEDIA.put(key,bytes,{httpMetadata:{contentType:mime,cacheControl:"public, max-age=3600"}});
-    try { await env.DB.prepare("INSERT INTO media(id,user_id,object_key,mime,size,created_at,expires_at) VALUES(?,?,?,?,?,?,?)").bind(id,user.id,key,mime,bytes.byteLength,created,expires).run(); }
+    try { await env.DB.prepare("INSERT INTO media(id,user_id,object_key,mime,size,created_at,expires_at,alt_text) VALUES(?,?,?,?,?,?,?,?)").bind(id,user.id,key,mime,bytes.byteLength,created,expires,altText).run(); }
     catch (error) { await env.MEDIA.delete(key); throw error; }
     return json({id,url:`${env.PUBLIC_BASE_URL}/media/${encodeURIComponent(id)}`,mime,size:bytes.byteLength},201,secureHeaders(cors));
   }
@@ -981,6 +1136,7 @@ async function handle(request, env, ctx) {
   }
   if (url.pathname.startsWith("/api/connections/") && request.method === "DELETE") {
     const user=await authenticate(request,env,env.DB,["admin"]); const provider=decodeURIComponent(url.pathname.split("/").at(-1));
+    if (provider === "bluesky") await env.DB.prepare("DELETE FROM atproto_oauth_sessions WHERE did IN (SELECT account_id FROM connections WHERE provider='bluesky' AND user_id IN (SELECT id FROM users WHERE org_id=?))").bind(user.org_id).run();
     const result=await env.DB.prepare("DELETE FROM connections WHERE provider=? AND user_id IN (SELECT id FROM users WHERE org_id=?)").bind(provider,user.org_id).run(); if (!result.meta?.changes) throw httpError("not-found",404);
     await auditEvent(env.DB,user.org_id,user.id,"social.disconnected",provider);
     return json({ok:true,providerAuthorizationMustBeRevoked:true},200,secureHeaders(cors));
