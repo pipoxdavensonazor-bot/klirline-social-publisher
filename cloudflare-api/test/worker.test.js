@@ -356,18 +356,16 @@ test("OAuth fallback account cap matches the nine-account workspace limit", asyn
   assert.equal((await start.json()).error, "missing-credentials");
 });
 
-test("LinkedIn OAuth verifies access to the configured organization", async () => {
+test("LinkedIn OAuth accepts approved publishing roles and rejects unrelated roles", async () => {
   const ctx = fixture({ PLAN_MAX_ACCOUNTS: "1" });
   const adminCookie = await bootstrap(ctx);
   const originalFetch = globalThis.fetch;
-  let allowAdminRole = true;
+  let organizationRole = "ADMINISTRATOR";
   globalThis.fetch = async (url) => {
     const target = String(url);
     if (target.includes("/oauth/v2/accessToken")) return Response.json({ access_token: "test-access-token", expires_in: 3600 });
     if (target.includes("/v2/userinfo")) return Response.json({ sub: "member-1", name: "LinkedIn Member" });
-    if (target.includes("/organizationAcls")) return Response.json({ elements: allowAdminRole
-      ? [{ state: "APPROVED", role: "ADMINISTRATOR", organization: ctx.env.LINKEDIN_ORGANIZATION_URN }]
-      : [{ state: "APPROVED", role: "CONTENT_ADMIN", organization: ctx.env.LINKEDIN_ORGANIZATION_URN }] });
+    if (target.includes("/organizationAcls")) return Response.json({ elements: [{ state: "APPROVED", role: organizationRole, organization: ctx.env.LINKEDIN_ORGANIZATION_URN }] });
     throw new Error(`Unexpected mocked fetch: ${target}`);
   };
   try {
@@ -383,6 +381,14 @@ test("LinkedIn OAuth verifies access to the configured organization", async () =
     assert.equal(accepted.status, 302);
     const connections = await (await ctx.request("/api/connections", "GET", null, { Cookie: adminCookie })).json();
     assert.ok(connections.some((item) => item.provider === "linkedin" && item.account.label === "LinkedIn organization"));
+    organizationRole="CONTENT_ADMIN";
+    const contentAdminOAuth=await begin(adminCookie);
+    const contentAdminAccepted=await ctx.request(`/oauth/linkedin/callback?code=fake&state=${encodeURIComponent(contentAdminOAuth.state)}`,"GET",null,{Cookie:`${adminCookie}; ${contentAdminOAuth.cookie}`});
+    assert.equal(contentAdminAccepted.status,302);
+    organizationRole="ANALYST";
+    const analystOAuth=await begin(adminCookie);
+    const analystRejected=await ctx.request(`/oauth/linkedin/callback?code=fake&state=${encodeURIComponent(analystOAuth.state)}`,"GET",null,{Cookie:`${adminCookie}; ${analystOAuth.cookie}`});
+    assert.equal(analystRejected.status,403);
     const overAccountLimit = await ctx.request("/oauth/instagram/start", "GET", null, { Cookie: adminCookie });
     assert.equal(overAccountLimit.status, 429);
 

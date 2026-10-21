@@ -339,8 +339,9 @@ async function completeOAuth(request, env, db) {
     const version = env.LINKEDIN_VERSION || "202610";
     const query = new URLSearchParams({ q: "roleAssignee", state: "APPROVED", count: "100" });
     const access = await graphJson(`https://api.linkedin.com/rest/organizationAcls?${query}`, token.access_token, { headers: { "X-Restli-Protocol-Version": "2.0.0", "Linkedin-Version": version } });
-    const canAdminister = (access.elements || []).some((entry) => entry.state === "APPROVED" && entry.role === "ADMINISTRATOR" && entry.organization === env.LINKEDIN_ORGANIZATION_URN);
-    if (!canAdminister) throw httpError("linkedin-member-must-be-approved-organization-admin", 403);
+    const publishingRoles = new Set(["ADMINISTRATOR", "DIRECT_SPONSORED_CONTENT_POSTER", "CONTENT_ADMIN", "CONTENT_ADMINISTRATOR"]);
+    const canPublish = (access.elements || []).some((entry) => entry.state === "APPROVED" && publishingRoles.has(entry.role) && entry.organization === env.LINKEDIN_ORGANIZATION_URN);
+    if (!canPublish) throw httpError("linkedin-member-lacks-organization-publishing-role", 403);
     account = { id: env.LINKEDIN_ORGANIZATION_URN, label: env.LINKEDIN_ORGANIZATION_NAME || "LinkedIn organization", memberId: identity.sub };
   }
   if (!account?.id || !account?.label) throw httpError("account-identity-missing", 502);
