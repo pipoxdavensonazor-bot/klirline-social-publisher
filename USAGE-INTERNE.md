@@ -40,6 +40,6 @@ Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000
 
 - Appliquer toutes les migrations jusqu’à 0012 avant d’utiliser les brouillons partagés, les métadonnées de campagne et la barrière d’approbation. Vérifier `/api/health` après migration.
 - Les brouillons partagés prennent en charge un pays, une langue, une destination et un fuseau horaire par variante; créer une variante distincte pour chaque adaptation pays/langue.
-- Le statut de relecture est partagé et audité, mais il ne constitue pas encore une barrière technique à la publication directe. Conserver la validation d’un responsable dans le processus d’équipe.
+- Le Worker applique la barrière d’approbation seulement si `REQUIRE_APPROVED_DRAFTS=true`; garder cette valeur activée dans les environnements internes et vérifier sa valeur dans Cloudflare avant le lancement des campagnes.
 - Valider les accès et publier de vrais essais contrôlés sur chaque réseau que Klirline prévoit d’utiliser; les liens de profil seuls ne donnent aucun droit de publication.
 - Choisir les réseaux prioritaires pays par pays, en fonction des comptes officiels, permissions et politiques régionales réellement disponibles.
