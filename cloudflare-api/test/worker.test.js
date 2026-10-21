@@ -7,7 +7,7 @@ import worker from "../src/index.js";
 function fixture(overrides = {}) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
-  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql"]) {
+  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql", "0005_plan_usage_limits.sql"]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
   class Statement {
@@ -161,7 +161,7 @@ test("subscription signup stays gated until a verified Stripe subscription is ac
   assert.equal((await (await disabled.request("/api/public-config")).json()).publicSignupEnabled, false);
   const rejectedSignup = await disabled.request("/api/auth/signup", "POST", { email: "closed@example.ca", password: "a-secure-password-123", organizationName: "Closed Studio" });
   assert.equal(rejectedSignup.status, 503);
-  const ctx = fixture({ ALLOW_PUBLIC_SIGNUP: "true", STRIPE_SECRET_KEY: "sk_test_example", STRIPE_PRICE_ID: "price_test_example", STRIPE_WEBHOOK_SECRET: "whsec_example" });
+  const ctx = fixture({ ALLOW_PUBLIC_SIGNUP: "true", STRIPE_SECRET_KEY: "sk_test_example", STRIPE_PRICE_ID: "price_test_example", STRIPE_WEBHOOK_SECRET: "whsec_example", PLAN_MONTHLY_POST_LIMIT: "1", PLAN_MAX_ACCOUNTS: "1" });
   await bootstrap(ctx);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -185,7 +185,8 @@ test("subscription signup stays gated until a verified Stripe subscription is ac
     const inactiveSchedule = await ctx.request("/api/scheduled", "POST", { text: "Hello", targets: ["facebook"], runAtUTC: new Date(Date.now() + 120000).toISOString() }, { Cookie: cookie });
     assert.equal(inactiveSchedule.status, 402);
 
-    const event = { id: "evt_subscription_created", type: "customer.subscription.created", data: { object: { id: "sub_example", customer: "cus_example", status: "active", metadata: { organization_id: signedUp.user.org } } } };
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const event = { id: "evt_subscription_created", type: "customer.subscription.created", data: { object: { id: "sub_example", customer: "cus_example", status: "active", metadata: { organization_id: signedUp.user.org }, items: { data: [{ current_period_start: nowSeconds, current_period_end: nowSeconds + 30 * 86400 }] } } } };
     async function sendStripeEvent(value) {
       const raw = JSON.stringify(value); const timestamp = Math.floor(Date.now() / 1000);
       const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(ctx.env.STRIPE_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -201,8 +202,22 @@ test("subscription signup stays gated until a verified Stripe subscription is ac
     const activated = await sendStripeEvent(event);
     assert.equal(activated.status, 200);
     assert.equal((await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json())).canPublish, true);
-    const scheduled = await ctx.request("/api/scheduled", "POST", { text: "Hello", targets: ["facebook"], runAtUTC: new Date(Date.now() + 120000).toISOString() }, { Cookie: cookie });
+    const scheduleBody = { text: "Hello", targets: ["facebook"], runAtUTC: new Date(Date.now() + 120000).toISOString() };
+    const scheduled = await ctx.request("/api/scheduled", "POST", scheduleBody, { Cookie: cookie, "Idempotency-Key": "schedule-one" });
     assert.equal(scheduled.status, 200);
+    const scheduleId = (await scheduled.json()).job.id;
+    const scheduleReplay = await ctx.request("/api/scheduled", "POST", scheduleBody, { Cookie: cookie, "Idempotency-Key": "schedule-one" });
+    assert.equal((await scheduleReplay.json()).deduped, true);
+    const quotaExceeded = await ctx.request("/api/scheduled", "POST", { ...scheduleBody, text: "Second post" }, { Cookie: cookie, "Idempotency-Key": "schedule-two" });
+    assert.equal(quotaExceeded.status, 429);
+    const canceledSchedule = await ctx.request(`/api/scheduled/${encodeURIComponent(scheduleId)}`, "DELETE", null, { Cookie: cookie });
+    assert.equal((await canceledSchedule.json()).status, "canceled");
+    const directPost = await ctx.request("/api/publish", "POST", { text: "One direct post", targets: ["facebook"] }, { Cookie: cookie, "Idempotency-Key": "publish-one" });
+    assert.equal(directPost.status, 200);
+    const directQuotaExceeded = await ctx.request("/api/scheduled", "POST", { ...scheduleBody, text: "Third post" }, { Cookie: cookie, "Idempotency-Key": "schedule-three" });
+    assert.equal(directQuotaExceeded.status, 429);
+    const usage = await ctx.request("/api/billing", "GET", null, { Cookie: cookie }).then((res) => res.json());
+    assert.deepEqual({ publications: usage.usage.publications, limit: usage.usage.publicationLimit }, { publications: 1, limit: 1 });
     const portal = await ctx.request("/api/billing/portal", "POST", {}, { Cookie: cookie });
     assert.equal((await portal.json()).portalUrl, "https://billing.stripe.com/p/session/test_example");
     const activeDelete = await ctx.request("/api/account", "DELETE", { password: "a-secure-password-123" }, { Cookie: cookie });
@@ -229,7 +244,7 @@ test("health endpoint reports missing production bindings and secrets", async ()
 });
 
 test("LinkedIn OAuth verifies access to the configured organization", async () => {
-  const ctx = fixture();
+  const ctx = fixture({ PLAN_MAX_ACCOUNTS: "1" });
   const adminCookie = await bootstrap(ctx);
   const originalFetch = globalThis.fetch;
   let allowAdminRole = true;
@@ -255,6 +270,8 @@ test("LinkedIn OAuth verifies access to the configured organization", async () =
     assert.equal(accepted.status, 302);
     const connections = await (await ctx.request("/api/connections", "GET", null, { Cookie: adminCookie })).json();
     assert.ok(connections.some((item) => item.provider === "linkedin" && item.account.label === "LinkedIn organization"));
+    const overAccountLimit = await ctx.request("/oauth/instagram/start", "GET", null, { Cookie: adminCookie });
+    assert.equal(overAccountLimit.status, 429);
 
     const forbiddenInvite = await ctx.request("/api/auth/register", "POST", { email: "writer@klirline.ca", password: "another-secure-password" }, { Cookie: adminCookie });
     assert.equal(forbiddenInvite.status, 403);

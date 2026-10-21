@@ -158,8 +158,42 @@ async function createPortalSession(org, env) {
   return portal.url;
 }
 async function requireActiveBilling(db, user) {
-  const org = await db.prepare("SELECT billing_status FROM organizations WHERE id=?").bind(user.org_id).first();
+  const org = await db.prepare("SELECT billing_status,billing_period_end FROM organizations WHERE id=?").bind(user.org_id).first();
   if (!org || !["active", "trialing"].includes(org.billing_status)) throw httpError("active-subscription-required", 402);
+  if (org.billing_status === "active" && org.billing_period_end && Date.parse(org.billing_period_end) <= Date.now()) throw httpError("active-subscription-required", 402);
+}
+function planLimit(env, key, fallback) {
+  const value = Number(env[key]);
+  return Number.isSafeInteger(value) && value > 0 && value <= 100000 ? value : fallback;
+}
+function usagePeriodKey(org) {
+  if (org?.billing_period_start && Number.isFinite(Date.parse(org.billing_period_start))) return new Date(org.billing_period_start).toISOString();
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+}
+async function reserveMonthlyPublication(db, user, env) {
+  const org = await db.prepare("SELECT billing_period_start FROM organizations WHERE id=?").bind(user.org_id).first();
+  if (!org) throw httpError("organization-not-found", 404);
+  const period = usagePeriodKey(org); const limit = planLimit(env, "PLAN_MONTHLY_POST_LIMIT", 50);
+  const row = await db.prepare(`INSERT INTO usage_counters(org_id,period_key,publication_count) VALUES(?,?,1)
+    ON CONFLICT(org_id,period_key) DO UPDATE SET publication_count=publication_count+1
+    WHERE publication_count<? RETURNING publication_count`).bind(user.org_id, period, limit).first();
+  if (!row) throw httpError("monthly-publication-limit-reached", 429);
+  return period;
+}
+async function releaseMonthlyPublication(db, orgId, period) {
+  if (!period) return;
+  await db.prepare("UPDATE usage_counters SET publication_count=publication_count-1 WHERE org_id=? AND period_key=? AND publication_count>0").bind(orgId, period).run();
+  await db.prepare("DELETE FROM usage_counters WHERE org_id=? AND period_key=? AND publication_count=0").bind(orgId, period).run();
+}
+async function billingUsage(db, user, env) {
+  const org = await db.prepare("SELECT billing_period_start,billing_period_end FROM organizations WHERE id=?").bind(user.org_id).first();
+  const period = usagePeriodKey(org);
+  const [usage, accounts] = await Promise.all([
+    db.prepare("SELECT publication_count FROM usage_counters WHERE org_id=? AND period_key=?").bind(user.org_id, period).first(),
+    db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id=?").bind(user.id).first()
+  ]);
+  return { periodStart: period, periodEnd: org?.billing_period_end || null, publications: usage?.publication_count || 0, publicationLimit: planLimit(env, "PLAN_MONTHLY_POST_LIMIT", 50), connectedAccounts: accounts?.count || 0, connectedAccountLimit: planLimit(env, "PLAN_MAX_ACCOUNTS", 3) };
 }
 async function readLimitedText(request, maxBytes) {
   const length = Number(request.headers.get("Content-Length") || 0);
@@ -209,7 +243,10 @@ async function processStripeEvent(request, env, db) {
     const customerId = typeof object.customer === "string" ? object.customer : object.customer?.id;
     if (!orgId && customerId) orgId = (await db.prepare("SELECT id FROM organizations WHERE stripe_customer_id=?").bind(customerId).first())?.id;
     const status = event.type === "customer.subscription.deleted" ? "canceled" : String(object.status || "");
-    if (orgId && status) statements.push(db.prepare("UPDATE organizations SET billing_status=?,stripe_customer_id=COALESCE(?,stripe_customer_id),stripe_subscription_id=? WHERE id=?").bind(status, customerId || null, object.id || null, orgId));
+    const subscriptionItem = (object.items?.data || []).find((item) => Number.isInteger(item.current_period_start) && Number.isInteger(item.current_period_end));
+    const periodStart = subscriptionItem ? new Date(subscriptionItem.current_period_start * 1000).toISOString() : null;
+    const periodEnd = subscriptionItem ? new Date(subscriptionItem.current_period_end * 1000).toISOString() : null;
+    if (orgId && status) statements.push(db.prepare("UPDATE organizations SET billing_status=?,stripe_customer_id=COALESCE(?,stripe_customer_id),stripe_subscription_id=?,billing_period_start=COALESCE(?,billing_period_start),billing_period_end=COALESCE(?,billing_period_end) WHERE id=?").bind(status, customerId || null, object.id || null, periodStart, periodEnd, orgId));
   }
   statements.push(db.prepare("INSERT INTO stripe_events(id,processed_at) VALUES(?,?)").bind(event.id, nowIso()));
   try { await db.batch(statements); }
@@ -302,6 +339,11 @@ function providerEnv(provider, env) {
 }
 async function oauthStart(provider, user, env, db) {
   if (!LAUNCH_PROVIDERS.includes(provider)) throw httpError("provider-out-of-scope-for-mvp", 501);
+  const current = await db.prepare("SELECT id FROM connections WHERE user_id=? AND provider=?").bind(user.id, provider).first();
+  if (!current) {
+    const count = await db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id=?").bind(user.id).first();
+    if (count?.count >= planLimit(env, "PLAN_MAX_ACCOUNTS", 3)) throw httpError("connected-account-limit-reached", 429);
+  }
   const cfg = providerEnv(provider, env);
   if (!cfg.id || !cfg.secret || !cfg.redirect || !env.FRONTEND_ORIGIN || !env.PUBLIC_BASE_URL) throw httpError("missing-credentials", 503);
   const state = randomId(32); const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(state));
@@ -501,17 +543,20 @@ async function accountPublish(request, user, env, db) {
     media = await loadMedia(media, env);
     if (!media) throw httpError("media-file-missing", 404);
   }
-  const id = randomId();
+  const usagePeriod = await reserveMonthlyPublication(db, user, env); const id = randomId();
   if (idem) {
-    try { await db.prepare("INSERT INTO posts(id,user_id,idempotency_key,text,media_id,results_json,created_at,request_fingerprint) VALUES(?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,"[]",nowIso(),fingerprint).run(); }
-    catch { const prior = await db.prepare("SELECT id,results_json,request_fingerprint FROM posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); const priorResults=JSON.parse(prior.results_json||"[]"); return {results:priorResults.length?priorResults:targets.map((provider)=>({provider,status:"action-required",message:"prior-attempt-status-unknown-check-network-before-retry"})),postId:prior.id,deduped:true}; } throw httpError("publish-idempotency-conflict", 409); }
+    try { await db.prepare("INSERT INTO posts(id,user_id,idempotency_key,text,media_id,results_json,created_at,request_fingerprint,usage_period) VALUES(?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,"[]",nowIso(),fingerprint,usagePeriod).run(); }
+    catch { await releaseMonthlyPublication(db,user.org_id,usagePeriod); const prior = await db.prepare("SELECT id,results_json,request_fingerprint FROM posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); const priorResults=JSON.parse(prior.results_json||"[]"); return {results:priorResults.length?priorResults:targets.map((provider)=>({provider,status:"action-required",message:"prior-attempt-status-unknown-check-network-before-retry"})),postId:prior.id,deduped:true}; } throw httpError("publish-idempotency-conflict", 409); }
   }
   const results = await Promise.all(targets.map(async (provider) => {
     const connection = await getConnection(db, user.id, provider);
     return connection ? publishOne(provider, connection, text, media, env) : { provider, status: "action-required", message: "not-connected" };
   }));
   if (idem) await db.prepare("UPDATE posts SET results_json=? WHERE id=?").bind(JSON.stringify(results), id).run();
-  else await db.prepare("INSERT INTO posts(id,user_id,text,media_id,results_json,created_at) VALUES(?,?,?,?,?,?)").bind(id,user.id,text,body.mediaId || null,JSON.stringify(results),nowIso()).run();
+  else {
+    try { await db.prepare("INSERT INTO posts(id,user_id,text,media_id,results_json,created_at,usage_period) VALUES(?,?,?,?,?,?,?)").bind(id,user.id,text,body.mediaId || null,JSON.stringify(results),nowIso(),usagePeriod).run(); }
+    catch (error) { await releaseMonthlyPublication(db,user.org_id,usagePeriod); throw error; }
+  }
   return { results, postId: id };
 }
 async function createSchedule(request, user, env, db) {
@@ -528,12 +573,13 @@ async function createSchedule(request, user, env, db) {
   const idem = String(request.headers.get("Idempotency-Key") || "").slice(0, 128) || null;
   const fingerprint = idem ? await requestFingerprint(user.id, "schedule", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, runAtUTC: runAt.toISOString() }) : null;
   if (idem) { const prior = await db.prepare("SELECT * FROM scheduled_posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); return { job: await scheduleView(db, prior), deduped: true }; } }
-  const id = randomId(); const created = nowIso();
+  const usagePeriod = await reserveMonthlyPublication(db, user, env); const id = randomId(); const created = nowIso();
   try {
-    const statements = [db.prepare("INSERT INTO scheduled_posts(id,user_id,idempotency_key,text,media_id,targets_json,status,run_at,created_at,request_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,JSON.stringify(targets),"queued",runAt.toISOString(),created,fingerprint)];
+    const statements = [db.prepare("INSERT INTO scheduled_posts(id,user_id,idempotency_key,text,media_id,targets_json,status,run_at,created_at,request_fingerprint,usage_period) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,JSON.stringify(targets),"queued",runAt.toISOString(),created,fingerprint,usagePeriod)];
     for (const provider of targets) statements.push(db.prepare("INSERT INTO scheduled_results(job_id,provider,status,attempts,next_run_at) VALUES(?,?,?,?,?)").bind(id,provider,"queued",0,runAt.toISOString()));
     await db.batch(statements);
   } catch (error) {
+    await releaseMonthlyPublication(db,user.org_id,usagePeriod);
     if (idem) { const prior = await db.prepare("SELECT * FROM scheduled_posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); return { job: await scheduleView(db, prior), deduped: true }; } }
     throw error;
   }
@@ -581,6 +627,7 @@ async function processDue(env, db) {
   await db.prepare("DELETE FROM media WHERE expires_at<=?").bind(now).run();
   await db.prepare("DELETE FROM oauth_states WHERE expires_at<=?").bind(now).run();
   await db.prepare("DELETE FROM auth_limits WHERE window_started<?").bind(Date.now() - 15 * 60 * 1000).run();
+  await db.prepare("DELETE FROM usage_counters WHERE period_key<?").bind(new Date(Date.now() - 400 * 86400000).toISOString()).run();
 }
 
 async function handle(request, env, ctx) {
@@ -666,7 +713,8 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/billing" && request.method === "GET") {
     const user = await authenticate(request, env, env.DB);
     const org = await env.DB.prepare("SELECT billing_status,stripe_customer_id,stripe_subscription_id FROM organizations WHERE id=?").bind(user.org_id).first();
-    return json({ status: org?.billing_status || "inactive", canPublish: ["active", "trialing"].includes(org?.billing_status), customerPortalAvailable: Boolean(org?.stripe_customer_id) }, 200, secureHeaders(cors));
+    const usage = await billingUsage(env.DB, user, env);
+    return json({ status: org?.billing_status || "inactive", canPublish: ["active", "trialing"].includes(org?.billing_status), customerPortalAvailable: Boolean(org?.stripe_customer_id), usage }, 200, secureHeaders(cors));
   }
   if (url.pathname === "/api/billing/checkout" && request.method === "POST") {
     const user = await authenticate(request, env, env.DB, ["admin"]);
@@ -711,8 +759,9 @@ async function handle(request, env, ctx) {
     return json(await Promise.all((rows.results||[]).map((row)=>scheduleView(env.DB,row))),200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/scheduled/") && request.method === "DELETE") {
-    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const result=await env.DB.prepare("UPDATE scheduled_posts SET status='canceled' WHERE id=? AND user_id=? AND status='queued'").bind(id,user.id).run();
+    const user=await authenticate(request,env,env.DB,["admin","redacteur"]); const id=decodeURIComponent(url.pathname.split("/").at(-1)); const before=await env.DB.prepare("SELECT usage_period FROM scheduled_posts WHERE id=? AND user_id=? AND status='queued'").bind(id,user.id).first(); const result=await env.DB.prepare("UPDATE scheduled_posts SET status='canceled' WHERE id=? AND user_id=? AND status='queued'").bind(id,user.id).run();
     if (!result.meta?.changes) { const found=await env.DB.prepare("SELECT status FROM scheduled_posts WHERE id=? AND user_id=?").bind(id,user.id).first(); if (!found) throw httpError("not-found",404); return json({id,status:found.status},200,secureHeaders(cors)); }
+    if (before?.usage_period) await releaseMonthlyPublication(env.DB,user.org_id,before.usage_period);
     return json({id,status:"canceled"},200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/connections/") && request.method === "DELETE") {
