@@ -49,6 +49,12 @@ export function startWorker(env, db, getMedia) {
         const conn = db.connections.find((c) => c.userId === job.authorId && c.provider === provider);
         if (!conn) { target.status = "action-required"; target.result = { provider, status: "action-required", message: "not-connected" }; continue; }
         const media = job.mediaId ? getMedia(job.mediaId) : null;
+        if (job.mediaId && !media) {
+          target.status = "action-required";
+          target.result = { provider, status: "action-required", message: "scheduled-media-missing" };
+          saveDb(env, db);
+          continue;
+        }
         target.attempts += 1;
         const result = { provider, ...(await publishOne(env, db, { connection: conn, text: job.text, media })) };
         target.result = result;

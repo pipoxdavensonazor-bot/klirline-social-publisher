@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "klirline-social-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-21",
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["* * * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "klirline-social",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "klirline-social-media" }
+  ],
+  "vars": {
+    "FRONTEND_ORIGIN": "https://app.klirline.com",
+    "PUBLIC_BASE_URL": "https://api.klirline.com",
+    "META_GRAPH_VERSION": "v26.0",
+    "THREADS_API_VERSION": "v1.0",
+    "LINKEDIN_VERSION": "202610",
+    "FACEBOOK_PAGE_ID": "",
+    "LINKEDIN_ORGANIZATION_URN": "",
+    "LINKEDIN_ORGANIZATION_NAME": "",
+    "META_APP_ID": "",
+    "INSTAGRAM_REDIRECT_URI": "https://api.klirline.com/oauth/instagram/callback",
+    "FACEBOOK_REDIRECT_URI": "https://api.klirline.com/oauth/facebook/callback",
+    "LINKEDIN_CLIENT_ID": "",
+    "LINKEDIN_REDIRECT_URI": "https://api.klirline.com/oauth/linkedin/callback",
+    "COMPANY_LEGAL_NAME": "",
+    "PRIVACY_CONTACT_EMAIL": "contact@klirline.ca"
+  }
+}

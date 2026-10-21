@@ -1,0 +1,20 @@
+# Copy this file to .dev.vars for local development. Never commit real values.
+FRONTEND_ORIGIN=http://localhost:8788
+PUBLIC_BASE_URL=http://localhost:8787
+SESSION_SECRET=replace-with-at-least-32-random-characters
+BOOTSTRAP_ADMIN_KEY=replace-with-a-different-32-character-random-secret
+TOKENS_ENCRYPTION_KEY_HEX=replace-with-64-hex-characters
+META_APP_ID=
+META_APP_SECRET=
+META_GRAPH_VERSION=v26.0
+INSTAGRAM_REDIRECT_URI=http://localhost:8787/oauth/instagram/callback
+FACEBOOK_REDIRECT_URI=http://localhost:8787/oauth/facebook/callback
+FACEBOOK_PAGE_ID=
+LINKEDIN_CLIENT_ID=
+LINKEDIN_CLIENT_SECRET=
+LINKEDIN_REDIRECT_URI=http://localhost:8787/oauth/linkedin/callback
+LINKEDIN_ORGANIZATION_URN=
+LINKEDIN_ORGANIZATION_NAME=
+LINKEDIN_VERSION=202610
+COMPANY_LEGAL_NAME=
+PRIVACY_CONTACT_EMAIL=contact@klirline.ca

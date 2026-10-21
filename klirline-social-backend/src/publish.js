@@ -35,7 +35,7 @@ export async function publishOne(env, db, { connection, text, media }) {
 }
 
 async function callProviderApi(provider, { access, text, media, connection, env }) {
-  const apiVersion = env.META_GRAPH_VERSION || "v25.0";
+  const apiVersion = env.META_GRAPH_VERSION || "v26.0";
   if (provider === "x") {
     const body = { text };
     if (media) {
@@ -46,13 +46,18 @@ async function callProviderApi(provider, { access, text, media, connection, env 
     return { id: j.data?.id };
   }
   if (provider === "facebook") {
-    if (media) return { status: "action-required", message: "facebook-media-upload-flow-not-configured" };
     const pageId = connection.account?.id;
     if (!pageId) return { status: "action-required", message: "facebook-page-not-connected" };
+    if (media) {
+      if (!media.url || !/^image\//.test(media.mime || "")) return { status: "action-required", message: "facebook-image-needs-public-image-url" };
+      const photo = await requestJson(`https://graph.facebook.com/${apiVersion}/${encodeURIComponent(pageId)}/photos`, { method: "POST", headers: { Authorization: "Bearer " + access, "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ url: media.url, caption: text, published: "true" }) });
+      return { id: photo.post_id || photo.id };
+    }
     const j = await requestJson(`https://graph.facebook.com/${apiVersion}/${encodeURIComponent(pageId)}/feed`, { method: "POST", headers: { Authorization: "Bearer " + access, "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ message: text }) });
     return { id: j.id };
   }
   if (provider === "instagram") {
+    if (media?.mime && media.mime !== "image/jpeg") return { status: "action-required", message: "instagram-requires-jpeg-image" };
     if (!/^image\//.test(media.mime || "") || !media.url) return { status: "action-required", message: "instagram-image-post-needs-public-image-url" };
     const userId = connection.account?.id;
     if (!userId) return { status: "action-required", message: "instagram-account-id-missing" };
@@ -63,7 +68,7 @@ async function callProviderApi(provider, { access, text, media, connection, env 
     return { id: posted.id };
   }
   if (provider === "threads") {
-    const base = `https://graph.threads.net/${apiVersion}/me`;
+    const base = `https://graph.threads.com/${env.THREADS_API_VERSION || "v1.0"}/me`;
     const fields = { media_type: "TEXT", text };
     if (media) {
       if (!media.url) return { status: "action-required", message: "threads-media-needs-public-url" };
@@ -79,10 +84,30 @@ async function callProviderApi(provider, { access, text, media, connection, env 
   if (provider === "linkedin") {
     const author = env.LINKEDIN_ORGANIZATION_URN;
     if (!author) return { status: "action-required", message: "linkedin-organization-urn-required" };
-    if (media) return { status: "action-required", message: "linkedin-media-upload-flow-not-configured" };
     const version = env.LINKEDIN_VERSION;
     if (!/^\d{6}$/.test(version || "")) return { status: "action-required", message: "linkedin-version-YYYYMM-required" };
-    const j = await requestJson("https://api.linkedin.com/rest/posts", { method: "POST", headers: { Authorization: "Bearer " + access, "Content-Type": "application/json", "X-Restli-Protocol-Version": "2.0.0", "Linkedin-Version": version }, body: JSON.stringify({ author, commentary: text, visibility: "PUBLIC", distribution: { feedDistribution: "MAIN_FEED", targetEntities: [], thirdPartyDistributionChannels: [] }, lifecycleState: "PUBLISHED", isReshareDisabledByAuthor: false }) });
+    const headers = { Authorization: "Bearer " + access, "Content-Type": "application/json", "X-Restli-Protocol-Version": "2.0.0", "Linkedin-Version": version };
+    let content;
+    if (media) {
+      if (!media.buffer || !["image/jpeg", "image/png"].includes(media.mime)) return { status: "action-required", message: "linkedin-image-requires-jpeg-or-png" };
+      const init = await requestJson("https://api.linkedin.com/rest/images?action=initializeUpload", { method: "POST", headers, body: JSON.stringify({ initializeUploadRequest: { owner: author } }) });
+      const uploadUrl = init.value?.uploadUrl, imageUrn = init.value?.image;
+      if (!uploadUrl || !imageUrn) throw new Error("linkedin-image-upload-details-missing");
+      const uploaded = await fetch(uploadUrl, { method: "PUT", headers: { Authorization: "Bearer " + access, "Content-Type": media.mime }, body: media.buffer });
+      if (!uploaded.ok) throw new Error("linkedin-image-upload-failed:" + uploaded.status);
+      let imageReady = false;
+      for (let attempt = 0; attempt < 15; attempt += 1) {
+        const status = await requestJson(`https://api.linkedin.com/rest/images/${encodeURIComponent(imageUrn)}`, { method: "GET", headers });
+        if (status.status === "AVAILABLE") { imageReady = true; break; }
+        if (status.status === "PROCESSING_FAILED") throw new Error("linkedin-image-processing-failed");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      if (!imageReady) throw new Error("linkedin-image-processing-timeout");
+      content = { media: { title: media.name || "Klirline", id: imageUrn } };
+    }
+    const post = { author, commentary: text, visibility: "PUBLIC", distribution: { feedDistribution: "MAIN_FEED", targetEntities: [], thirdPartyDistributionChannels: [] }, lifecycleState: "PUBLISHED", isReshareDisabledByAuthor: false };
+    if (content) post.content = content;
+    const j = await requestJson("https://api.linkedin.com/rest/posts", { method: "POST", headers, body: JSON.stringify(post) });
     return { id: j.id || null };
   }
   if (provider === "pinterest") {
@@ -108,5 +133,7 @@ async function requestJson(url, options) {
   const response = await fetch(url, options);
   const body = await response.json().catch(() => ({}));
   if (!response.ok || body.error) throw new Error(`provider-api:${response.status}:${String(body.error?.message || body.message || body.error || "request-failed").slice(0, 160)}`);
+  const restliId = response.headers.get("x-restli-id");
+  if (restliId && !body.id) body.id = restliId;
   return body;
 }

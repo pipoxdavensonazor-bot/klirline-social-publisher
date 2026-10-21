@@ -82,10 +82,10 @@ export function providerStatus(providerId, env) {
   // Indique simplement si les identifiants serveur sont renseignes (sans les exposer).
   if (providerId === "bluesky") return "requires-atproto-oauth-client";
   const map = {
-    instagram: ["META_APP_ID", "META_APP_SECRET"], facebook: ["META_APP_ID", "META_APP_SECRET", "FACEBOOK_PAGE_ID"],
-    threads: ["META_APP_ID", "META_APP_SECRET"], linkedin: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_ORGANIZATION_URN", "LINKEDIN_VERSION"],
-    x: ["X_CLIENT_ID"], pinterest: ["PINTEREST_APP_ID", "PINTEREST_APP_SECRET", "PINTEREST_DEFAULT_BOARD_ID"],
-    bluesky: ["BLUESKY_CLIENT_METADATA_URL"], tiktok: ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET"], twitch: ["TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET"],
+    instagram: ["META_APP_ID", "META_APP_SECRET", "INSTAGRAM_REDIRECT_URI"], facebook: ["META_APP_ID", "META_APP_SECRET", "FACEBOOK_REDIRECT_URI", "FACEBOOK_PAGE_ID"],
+    threads: ["META_APP_ID", "META_APP_SECRET", "THREADS_REDIRECT_URI"], linkedin: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_REDIRECT_URI", "LINKEDIN_ORGANIZATION_URN", "LINKEDIN_VERSION"],
+    x: ["X_CLIENT_ID", "X_REDIRECT_URI"], pinterest: ["PINTEREST_APP_ID", "PINTEREST_APP_SECRET", "PINTEREST_REDIRECT_URI", "PINTEREST_DEFAULT_BOARD_ID"],
+    bluesky: ["BLUESKY_CLIENT_METADATA_URL"], tiktok: ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_REDIRECT_URI"], twitch: ["TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET", "TWITCH_REDIRECT_URI"],
   };
   const keys = map[providerId] || [];
   if (!keys.length) return "not-configured";

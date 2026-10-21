@@ -1,0 +1,15 @@
+{
+  "name": "klirline-social-cloudflare-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test",
+    "db:local": "wrangler d1 migrations apply klirline-social --local",
+    "db:remote": "wrangler d1 migrations apply klirline-social --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

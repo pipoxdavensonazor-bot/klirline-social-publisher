@@ -1,0 +1,37 @@
+name: Validate Klirline Social
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test Cloudflare Worker flows
+        working-directory: cloudflare-api
+        run: npm test
+      - name: Check Worker and reference backend syntax
+        run: |
+          node --check cloudflare-api/src/index.js
+          node --check klirline-social-backend/src/index.js
+          node --check klirline-social-backend/src/auth.js
+          node --check klirline-social-backend/src/config.js
+          node --check klirline-social-backend/src/legal.js
+          node --check klirline-social-backend/src/lib.js
+          node --check klirline-social-backend/src/oauth.js
+          node --check klirline-social-backend/src/publish.js
+          node --check klirline-social-backend/src/queue.js
+      - name: Check frontend and project configuration
+        run: node scripts/check-project.mjs
