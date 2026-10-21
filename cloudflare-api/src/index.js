@@ -8,6 +8,7 @@ const PROVIDERS = {
 const LAUNCH_PROVIDERS = ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"];
 const REQUIRED_SCHEMA_TABLES = ["users", "oauth_states", "connections", "media", "posts", "scheduled_posts", "scheduled_results", "organizations", "usage_counters", "auth_limits", "team_invitations", "audit_events", "campaign_drafts"];
 const DEFAULT_MAX_ACCOUNTS = 9;
+const NON_ISO_REGION_CODES = new Set(["AC", "CP", "DG", "EA", "EU", "EZ", "IC", "TA", "UN", "XK"]);
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const COOKIE = "klirline_session";
@@ -629,14 +630,20 @@ function campaignDraftInput(body) {
   const targets=body.targets===undefined?[]:body.targets;
   if (!Array.isArray(targets) || targets.length>9 || targets.some((provider)=>typeof provider!=="string"||!PROVIDERS[provider])) throw httpError("unsupported-target");
   const countryCode=String(body.countryCode||"").trim().toUpperCase();
-  if (countryCode && !/^[A-Z]{2}$/.test(countryCode)) throw httpError("invalid-country-code");
+  if (countryCode) {
+    const displayName=/^[A-Z]{2}$/.test(countryCode)&&!NON_ISO_REGION_CODES.has(countryCode)
+      ? new Intl.DisplayNames(["en"],{type:"region",fallback:"none"}).of(countryCode)
+      : undefined;
+    if (!displayName || displayName===countryCode || displayName==="Unknown Region") throw httpError("invalid-country-code");
+  }
   const languageTag=String(body.languageTag||"").trim();
-  if (languageTag) { try { if (Intl.getCanonicalLocales(languageTag).length!==1) throw new Error(); } catch { throw httpError("invalid-language-tag"); } }
+  let canonicalLanguageTag=languageTag;
+  if (languageTag) { try { canonicalLanguageTag=Intl.getCanonicalLocales(languageTag)[0]; if (!canonicalLanguageTag) throw new Error(); } catch { throw httpError("invalid-language-tag"); } }
   const timezone=String(body.timezone||"").trim();
   if (timezone) { try { new Intl.DateTimeFormat("en",{timeZone:timezone}); } catch { throw httpError("invalid-time-zone"); } }
   const mediaId=body.mediaId?String(body.mediaId):null;
   if(mediaId && mediaId.length>128) throw httpError("invalid-media-id");
-  return {title:title||text.slice(0,80),text,targets:[...new Set(targets)],countryCode,languageTag,timezone,mediaId};
+  return {title:title||text.slice(0,80),text,targets:[...new Set(targets)],countryCode,languageTag:canonicalLanguageTag,timezone,mediaId};
 }
 
 async function handle(request, env, ctx) {

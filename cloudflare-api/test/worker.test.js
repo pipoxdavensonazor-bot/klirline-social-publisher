@@ -201,10 +201,10 @@ test("shared campaign drafts enforce workspace visibility and approval roles", a
   const editorCookie=accepted.headers.get("set-cookie").split(";")[0];
   const imageForm=new FormData(); imageForm.append("file",new Blob([Uint8Array.from([255,216,255,0])],{type:"image/jpeg"}),"canada.jpg");
   const mediaUpload=await ctx.request("/api/media","POST",imageForm,{Cookie:adminCookie}); const mediaId=(await mediaUpload.json()).id;
-  const draftResponse=await ctx.request("/api/drafts","POST",{title:"Campagne Canada",text:"Version française de campagne",targets:["facebook"],countryCode:"ca",languageTag:"fr-CA",timezone:"America/Toronto",mediaId},{Cookie:editorCookie});
+  const draftResponse=await ctx.request("/api/drafts","POST",{title:"Campagne Canada",text:"Version française de campagne",targets:["facebook"],countryCode:"ca",languageTag:"fr-ca",timezone:"America/Toronto",mediaId},{Cookie:editorCookie});
   assert.equal(draftResponse.status,201);
   const draft=await draftResponse.json();
-  assert.equal(draft.countryCode,"CA"); assert.equal(draft.reviewStatus,"draft"); assert.equal(draft.mediaId,mediaId);
+  assert.equal(draft.countryCode,"CA"); assert.equal(draft.languageTag,"fr-CA"); assert.equal(draft.reviewStatus,"draft"); assert.equal(draft.mediaId,mediaId);
   assert.equal((await (await ctx.request("/api/drafts","GET",null,{Cookie:adminCookie})).json())[0].id,draft.id);
   assert.equal((await ctx.request(`/api/drafts/${draft.id}/review`,"POST",{decision:"approved"},{Cookie:editorCookie})).status,403);
   assert.equal((await ctx.request(`/api/drafts/${draft.id}`,"POST",{action:"submit-review"},{Cookie:editorCookie})).status,200);
@@ -212,6 +212,8 @@ test("shared campaign drafts enforce workspace visibility and approval roles", a
   const corrected=await ctx.request(`/api/drafts/${draft.id}`,"PUT",{title:"Campagne Canada corrigée",text:"Version corrigée",targets:["facebook"],countryCode:"CA",languageTag:"fr-CA",timezone:"America/Toronto"},{Cookie:editorCookie});
   assert.equal((await corrected.json()).reviewStatus,"draft");
   assert.equal((await ctx.request("/api/drafts","POST",{text:"Mauvais pays",countryCode:"CAN"},{Cookie:editorCookie})).status,400);
+  assert.equal((await ctx.request("/api/drafts","POST",{text:"Pays inconnu",countryCode:"ZZ"},{Cookie:editorCookie})).status,400);
+  assert.equal((await ctx.request("/api/drafts","POST",{text:"Région réservée",countryCode:"EU"},{Cookie:editorCookie})).status,400);
   assert.equal((await ctx.request("/api/drafts","GET")).status,401);
   const audit=await (await ctx.request("/api/audit","GET",null,{Cookie:adminCookie})).json();
   assert.ok(audit.some(event=>event.type==="campaign.draft.rejected"));
