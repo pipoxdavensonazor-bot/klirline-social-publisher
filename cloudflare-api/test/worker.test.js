@@ -77,10 +77,12 @@ test("internal auth, media, scheduling, and publish idempotency", async () => {
 
   const form = new FormData();
   form.append("file", new Blob([Uint8Array.from([255, 216, 255, 0])], { type: "image/jpeg" }), "campaign.jpg");
+  form.append("altText", "Capture de la page Klirline");
   const upload = await ctx.request("/api/media", "POST", form, { Cookie: cookie });
   const media = await upload.json();
   assert.equal(upload.status, 201);
   assert.equal(ctx.objects.size, 1);
+  assert.equal(ctx.sqlite.prepare("SELECT alt_text FROM media WHERE id=?").get(media.id).alt_text, "Capture de la page Klirline");
 
   ctx.sqlite.prepare("UPDATE media SET expires_at=? WHERE id=?").run(new Date(Date.now() + 60 * 60 * 1000).toISOString(), media.id);
   const expiringMediaSchedule = await ctx.request("/api/scheduled", "POST", {

@@ -14,8 +14,8 @@ Cet outil est réservé aux équipes Klirline. Il sert à coordonner la promotio
 
 | Réseau | Mode dans le pilote | À confirmer avant usage réel |
 |---|---|---|
-| Instagram, Facebook Page, LinkedIn, Threads, X, Pinterest | Publication et programmation côté Worker lorsqu’un compte est connecté | App développeur, scopes, consentement, formats et test contrôlé sur le compte officiel |
-| TikTok, Bluesky | Préparation locale, puis confirmation manuelle par un membre | Pas d’adaptateur de publication dans le Worker; la politique TikTok rend le Direct Post inadapté au périmètre interne actuel |
+| Instagram, Facebook Page, LinkedIn, Threads, X, Pinterest, Bluesky | Publication et programmation côté Worker lorsqu’un compte est connecté | App développeur, scopes, consentement, formats et test contrôlé sur le compte officiel; Bluesky exige HTTPS, une session OAuth et un alt text avec image |
+| TikTok | Préparation locale, puis confirmation manuelle par un membre | L’API Direct Post n’est pas adaptée à cet outil interne selon les règles de partage TikTok |
 | Twitch | Lien de profil et préparation manuelle | Le produit ne publie pas de post promotionnel générique sur Twitch |
 
 Le code de ces intégrations ne prouve pas qu’un compte réel est connecté ni qu’une publication publique sera acceptée. Pour les contenus vidéo, utiliser uniquement les parcours manuels qui apparaissent dans l’interface; l’API de publication actuelle accepte seulement les formats documentés par destination.
@@ -37,4 +37,4 @@ Le code de ces intégrations ne prouve pas qu’un compte réel est connecté ni
 
 ## Limites actuelles à suivre
 
-L’interface locale conserve les profils manuels, brouillons et rappels dans le navigateur. Les rappels manuels dépendent de cet appareil et ne publient pas automatiquement. Le Worker permet la publication API pour six réseaux sous réserve d’autorisations. L’inscription publique reste désactivée et l’espace ne comporte aucun paiement ni abonnement.
+L’interface locale conserve les profils manuels, brouillons et rappels dans le navigateur. Les rappels manuels dépendent de cet appareil et ne publient pas automatiquement. Le Worker permet la publication API pour sept réseaux sous réserve d’autorisations réelles et d’une mise en service de l’API. L’inscription publique reste désactivée et l’espace ne comporte aucun paiement ni abonnement.

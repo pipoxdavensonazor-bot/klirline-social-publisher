@@ -2,6 +2,10 @@
 **Date de vérification initiale : 20 octobre 2026**
 **Objectif actuel :** outil interne Klirline pour préparer et diffuser les promotions de l’entreprise, sans vente d’abonnement.
 
+## État d’implémentation — 21 octobre 2026
+
+L’analyse de prérequis ci-dessous est historique. Depuis sa rédaction, le pilote Cloudflare a ajouté l’OAuth AT Protocol et la publication Bluesky : session D1 chiffrée, création de post texte, image JPEG/PNG de 2 Mo maximum, texte alternatif et limites par destination. Bluesky est donc implémenté dans le code, mais son authentification n’a pas été validée sur le compte Klirline ni en production. TikTok reste un parcours manuel pour l’outil interne conformément aux limites relevées dans cette recherche. Le déploiement de l’API, les migrations distantes jusqu’à 0014 et les essais sur comptes réels restent à faire.
+
 ## Vérification des prérequis TikTok et Bluesky — 21 octobre 2026
 
 - **TikTok : ne pas développer de publication automatique pour cet outil interne.** Les règles officielles du Content Posting API disent qu’un client ne peut pas être limité à une équipe interne/privée et citent explicitement comme cas non acceptable un utilitaire qui téléverse vers des comptes gérés par l’équipe. Le Direct Post non audité est en outre limité à cinq créateurs par fenêtre de 24 h et aux comptes privés avec une visibilité `SELF_ONLY`. Une revue ne change pas l’inadmissibilité d’un outil réservé à Klirline. Garder l’ajout de profil et la préparation manuelle, avec confirmation dans TikTok. Si un futur produit destiné à une large audience est envisagé, réévaluer séparément ses règles, sa revue et son interface avant tout code. [Règles de partage TikTok](https://developers.tiktok.com/docs/en/content-sharing-guidelines), [démarrage Direct Post](https://developers.tiktok.com/docs/en/content-posting-api-get-started).
