@@ -7,7 +7,7 @@ import worker from "../src/index.js";
 function fixture(overrides = {}) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
-  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql", "0005_plan_usage_limits.sql", "0006_stripe_event_order.sql"]) {
+  for (const migration of ["0001_initial.sql", "0002_login_limits.sql", "0003_idempotency_fingerprints.sql", "0004_billing_organizations.sql", "0005_plan_usage_limits.sql", "0006_stripe_event_order.sql", "0007_user_auth_version.sql"]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
   class Statement {
@@ -139,6 +139,21 @@ test("write requests reject missing origin and CSRF marker", async () => {
     body: JSON.stringify({ email: "owner@klirline.ca", password: "a-secure-password-123" })
   }), ctx.env, { waitUntil() {} });
   assert.equal(response.status, 403);
+});
+
+test("password changes invalidate previous sessions and keep the current session active", async () => {
+  const ctx = fixture();
+  const oldCookie = await bootstrap(ctx);
+  const deniedChange = await ctx.request("/api/auth/password", "POST", { currentPassword: "wrong-password", newPassword: "another-secure-password" }, { Cookie: oldCookie });
+  assert.equal(deniedChange.status, 401);
+  const changed = await ctx.request("/api/auth/password", "POST", { currentPassword: "a-secure-password-123", newPassword: "a-different-password-456" }, { Cookie: oldCookie });
+  assert.equal(changed.status, 200);
+  const newCookie = changed.headers.get("set-cookie").split(";")[0];
+  assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: newCookie })).status, 200);
+  assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: oldCookie })).status, 401);
+  const oldPasswordLogin = await ctx.request("/api/auth/login", "POST", { email: "owner@klirline.ca", password: "a-secure-password-123" });
+  assert.equal(oldPasswordLogin.status, 401);
+  assert.equal((await ctx.request("/api/auth/login", "POST", { email: "owner@klirline.ca", password: "a-different-password-456" })).status, 200);
 });
 
 test("JSON request limit is enforced when Content-Length is absent", async () => {

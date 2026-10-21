@@ -46,7 +46,7 @@ async function hmacKey(secret) {
 }
 async function makeSession(user, env) {
   const head = b64u(new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
-  const body = b64u(new TextEncoder().encode(JSON.stringify({ sub: user.id, role: user.role, org: user.org_id, exp: Math.floor(Date.now() / 1000) + 43200 })));
+  const body = b64u(new TextEncoder().encode(JSON.stringify({ sub: user.id, role: user.role, org: user.org_id, ver: user.auth_version || 0, exp: Math.floor(Date.now() / 1000) + 43200 })));
   const input = `${head}.${body}`;
   const signature = await crypto.subtle.sign("HMAC", await hmacKey(env.SESSION_SECRET), new TextEncoder().encode(input));
   return `${input}.${b64u(signature)}`;
@@ -62,8 +62,9 @@ async function authenticate(request, env, db, roles = []) {
   let payload;
   try { payload = JSON.parse(new TextDecoder().decode(unb64u(body))); } catch { throw httpError("bad-token", 401); }
   if (!payload.exp || payload.exp <= Date.now() / 1000) throw httpError("bad-token", 401);
-  const user = await db.prepare("SELECT id,email,role,org_id FROM users WHERE id=?").bind(payload.sub).first();
+  const user = await db.prepare("SELECT id,email,role,org_id,auth_version FROM users WHERE id=?").bind(payload.sub).first();
   if (!user) throw httpError("unknown-user", 401);
+  if ((payload.ver || 0) !== (user.auth_version || 0)) throw httpError("bad-token", 401);
   if (roles.length && !roles.includes(user.role)) throw httpError("forbidden-role", 403);
   return user;
 }
@@ -680,7 +681,7 @@ async function handle(request, env, ctx) {
     const id=randomId(); const salt=randomId(16); const hash=await passwordHash(password,salt);
     try { await env.DB.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) SELECT ?,?,?,?,'admin','klirline',? WHERE NOT EXISTS(SELECT 1 FROM users)").bind(id,email,salt,hash,nowIso()).run(); }
     catch { throw httpError("admin-already-created",409); }
-    const user=await env.DB.prepare("SELECT id,email,role,org_id FROM users WHERE id=?").bind(id).first(); if (!user) throw httpError("admin-already-created",409);
+    const user=await env.DB.prepare("SELECT id,email,role,org_id,auth_version FROM users WHERE id=?").bind(id).first(); if (!user) throw httpError("admin-already-created",409);
     const token=await makeSession(user,env); return json({ user:userMetadata(user), first:true },201,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
   }
   if (url.pathname === "/api/auth/signup" && request.method === "POST") {
@@ -701,7 +702,7 @@ async function handle(request, env, ctx) {
     try { await env.DB.batch(statements); }
     catch { throw httpError("signup-failed", 409); }
     await clearLoginLimit(keys, env.DB);
-    const user = await env.DB.prepare("SELECT id,email,role,org_id FROM users WHERE id=?").bind(id).first();
+    const user = await env.DB.prepare("SELECT id,email,role,org_id,auth_version FROM users WHERE id=?").bind(id).first();
     const token = await makeSession(user, env);
     try {
       const org = await env.DB.prepare("SELECT id,name,stripe_customer_id,billing_status FROM organizations WHERE id=?").bind(orgId).first();
@@ -718,6 +719,18 @@ async function handle(request, env, ctx) {
     if (!user || !same(candidate,user.password_hash)) throw httpError("invalid-credentials",401);
     await clearLoginLimit(keys,env.DB);
     const token=await makeSession(user,env); return json({ user:userMetadata(user) },200,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
+  }
+  if (url.pathname === "/api/auth/password" && request.method === "POST") {
+    const user = await authenticate(request,env,env.DB); const body = await readJson(request);
+    const row = await env.DB.prepare("SELECT password_salt,password_hash,auth_version FROM users WHERE id=?").bind(user.id).first();
+    if (!row || !same(await passwordHash(String(body.currentPassword||""),row.password_salt),row.password_hash)) throw httpError("invalid-credentials",401);
+    const nextPassword = String(body.newPassword||"");
+    if (nextPassword.length < 12 || nextPassword.length > 200) throw httpError("password-too-short");
+    if (nextPassword === String(body.currentPassword||"")) throw httpError("new-password-must-differ");
+    const salt = randomId(16); const hash = await passwordHash(nextPassword,salt); const version = row.auth_version + 1;
+    await env.DB.prepare("UPDATE users SET password_salt=?,password_hash=?,auth_version=? WHERE id=?").bind(salt,hash,version,user.id).run();
+    const token = await makeSession({...user,auth_version:version},env);
+    return json({ok:true},200,secureHeaders({...cors,"Set-Cookie":sessionCookie(token)}));
   }
   if (url.pathname === "/api/auth/logout" && request.method === "POST") return json({ok:true},200,secureHeaders({...cors,"Set-Cookie":clearCookie()}));
   if (url.pathname === "/api/billing" && request.method === "GET") {
