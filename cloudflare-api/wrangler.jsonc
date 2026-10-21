@@ -23,6 +23,8 @@
     "THREADS_API_VERSION": "v1.0",
     "THREADS_APP_ID": "",
     "THREADS_REDIRECT_URI": "https://api.klirline.com/oauth/threads/callback",
+    "X_CLIENT_ID": "",
+    "X_REDIRECT_URI": "https://api.klirline.com/oauth/x/callback",
     "LINKEDIN_VERSION": "202610",
     "FACEBOOK_PAGE_ID": "",
     "LINKEDIN_ORGANIZATION_URN": "",
