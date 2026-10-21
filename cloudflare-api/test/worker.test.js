@@ -540,11 +540,14 @@ test("publication adapters send image posts to Instagram, Facebook Page, LinkedI
     assert.equal(response.status, 200);
     assert.deepEqual(publication.results.map((item) => item.status), ["published", "published", "published", "published", "published", "published"]);
     assert.deepEqual(publication.results.map((item) => item.postId), ["ig-published-1", "fb-published-1", "urn:li:share:linkedin-published-1","threads-published-1","x-published-1","pin-published-1"]);
+    const linkedInPostCall = calls.find((call) => call.url === "https://api.linkedin.com/rest/posts");
+    const linkedInPostBody = JSON.parse(linkedInPostCall.body);
+    assert.deepEqual(linkedInPostBody.content, { media: { id: "urn:li:image:image-1" } });
     assert.equal(calls.find((call) => call.url.includes("instagram.com/v26.0/ig-account-1/media_publish")).headers.get("authorization"), "Bearer instagram-refreshed-token");
     assert.ok(calls.some((call) => call.url.includes("graph.instagram.com/access_token") && new URL(call.url).searchParams.get("grant_type") === "ig_exchange_token"));
     assert.ok(calls.some((call) => call.url.includes("graph.instagram.com/refresh_access_token") && new URL(call.url).searchParams.get("grant_type") === "ig_refresh_token"));
     assert.equal(calls.find((call) => call.url.includes("facebook.com/v26.0/page-123/photos")).headers.get("authorization"), "Bearer facebook-page-token");
-    assert.equal(calls.find((call) => call.url === "https://api.linkedin.com/rest/posts").headers.get("authorization"), "Bearer linkedin-refreshed-token");
+    assert.equal(linkedInPostCall.headers.get("authorization"), "Bearer linkedin-refreshed-token");
     assert.ok(calls.some((call) => call.url.includes("/oauth/v2/accessToken") && String(call.body).includes("grant_type=refresh_token")));
     assert.equal(calls.find((call) => call.url === "https://api.linkedin.com/rest/posts").headers.get("linkedin-version"), "202610");
     assert.equal(calls.find((call) => call.url.includes("threads_publish")).headers.get("authorization"),"Bearer threads-refreshed-token");

@@ -456,9 +456,9 @@ async function publishOne(provider, connection, text, media, env) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
         }
         if (!ready) throw httpError("linkedin-image-processing-timeout", 502);
-        mediaContent = { media: { title: "Klirline", id: image } };
+        mediaContent = { media: { id: image } };
       }
-      const post = { author: connection.account_id, commentary: text, visibility: "PUBLIC", distribution: { feedDistribution: "MAIN_FEED", targetEntities: [], thirdPartyDistributionChannels: [] }, ...(mediaContent ? { content: { ...mediaContent, mediaCategory: "IMAGE" } } : {}) };
+      const post = { author: connection.account_id, commentary: text, visibility: "PUBLIC", distribution: { feedDistribution: "MAIN_FEED", targetEntities: [], thirdPartyDistributionChannels: [] }, ...(mediaContent ? { content: mediaContent } : {}) };
       const result = await graphJson("https://api.linkedin.com/rest/posts", null, { method: "POST", headers, body: JSON.stringify(post) });
       return { provider, status: "published", postId: result.id || null, message: "ok" };
     }
