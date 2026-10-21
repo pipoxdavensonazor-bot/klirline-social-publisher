@@ -15,8 +15,11 @@ if (config.name !== "klirline-social-api") fail(`Nom Worker inattendu: ${config.
 if (config.d1_databases?.[0]?.database_id?.includes("REPLACE_WITH")) fail("Remplacer database_id dans cloudflare-api/wrangler.jsonc par l'ID D1 réel.");
 if (!config.d1_databases?.length) fail("Binding D1 manquant.");
 if (!config.r2_buckets?.length) fail("Binding R2 manquant.");
-if (config.vars?.INTERNAL_MODE !== "true") fail("Activer INTERNAL_MODE=true pour l’espace Klirline interne.");
-if (config.vars?.ALLOW_PUBLIC_SIGNUP !== "false") fail("Garder ALLOW_PUBLIC_SIGNUP à false; les inscriptions publiques sont interdites.");
+const internalMode = config.vars?.INTERNAL_MODE === "true";
+const publicSignup = config.vars?.ALLOW_PUBLIC_SIGNUP === "true";
+if (internalMode === publicSignup) fail("Choisir un seul mode : INTERNAL_MODE=true pour usage interne, ou INTERNAL_MODE=false avec ALLOW_PUBLIC_SIGNUP=true pour l’offre commerciale.");
+if (!internalMode && publicSignup && !config.vars?.STRIPE_PRICE_ID) warn("Créer dans Stripe le prix récurrent USD 9,99/mois par espace et renseigner STRIPE_PRICE_ID.");
+if (!internalMode && publicSignup && config.vars?.STRIPE_AUTOMATIC_TAX_ENABLED !== "true") warn("Configurer Stripe Tax (inscriptions et calcul des taxes applicables), puis activer STRIPE_AUTOMATIC_TAX_ENABLED.");
 if (config.vars?.REQUIRE_APPROVED_DRAFTS !== "true") fail("Exiger un brouillon partagé approuvé avant toute publication API automatique.");
 for (const name of ["FRONTEND_ORIGIN", "PUBLIC_BASE_URL"]) {
   try {
@@ -28,7 +31,7 @@ for (const name of ["FRONTEND_ORIGIN", "PUBLIC_BASE_URL"]) {
 for (const name of ["META_APP_ID", "LINKEDIN_CLIENT_ID", "THREADS_APP_ID", "X_CLIENT_ID", "PINTEREST_APP_ID", "FACEBOOK_PAGE_ID", "LINKEDIN_ORGANIZATION_URN"]) {
   if (!config.vars?.[name]) warn(`Configurer ${name} seulement si le parcours correspondant est inclus au lancement.`);
 }
-for (const secret of ["SESSION_SECRET", "BOOTSTRAP_ADMIN_KEY", "TOKENS_ENCRYPTION_KEY_HEX", "META_APP_SECRET", "LINKEDIN_CLIENT_SECRET", "THREADS_APP_SECRET", "X_CLIENT_SECRET", "PINTEREST_APP_SECRET"]) {
+for (const secret of ["SESSION_SECRET", "BOOTSTRAP_ADMIN_KEY", "TOKENS_ENCRYPTION_KEY_HEX", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "META_APP_SECRET", "LINKEDIN_CLIENT_SECRET", "THREADS_APP_SECRET", "X_CLIENT_SECRET", "PINTEREST_APP_SECRET"]) {
   warn(`Créer/configurer le secret Cloudflare ${secret}; ne pas l'ajouter au dépôt.`);
 }
 if (!migrations.length) fail("Aucune migration D1 trouvée.");

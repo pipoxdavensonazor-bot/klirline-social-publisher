@@ -1,6 +1,6 @@
 # Guide de campagne internationale Klirline
 
-Cet outil est réservé aux équipes Klirline. Il sert à coordonner la promotion des services dans les pays desservis; il n’est pas commercialisé et ne traite aucun paiement.
+L’espace Klirline sert à coordonner la promotion des services de l’entreprise dans les pays desservis. Le même outil peut être utilisé par des organisations clientes dans leurs espaces séparés; l’offre prévue est de 9,99 USD par espace de travail et par mois. Le contenu, les comptes sociaux et les membres restent séparés par espace.
 
 ## Préparer une campagne par marché
 
@@ -37,4 +37,4 @@ Le code de ces intégrations ne prouve pas qu’un compte réel est connecté ni
 
 ## Limites actuelles à suivre
 
-L’interface locale conserve les profils manuels, brouillons et rappels dans le navigateur. Les rappels manuels dépendent de cet appareil et ne publient pas automatiquement. Le Worker permet la publication API pour sept réseaux sous réserve d’autorisations réelles et d’une mise en service de l’API. L’inscription publique reste désactivée et l’espace ne comporte aucun paiement ni abonnement.
+L’interface locale conserve les profils manuels, brouillons et rappels dans le navigateur. Les rappels manuels dépendent de cet appareil et ne publient pas automatiquement. Le Worker permet la publication API pour sept réseaux sous réserve d’autorisations réelles et d’une mise en service de l’API. Les inscriptions commerciales et paiements resteront masqués jusqu’à la configuration des secrets Stripe, du prix récurrent et du webhook; l’espace Klirline est exempté.

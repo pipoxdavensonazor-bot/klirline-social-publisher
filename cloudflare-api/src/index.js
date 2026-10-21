@@ -1,6 +1,7 @@
 import { xTextMetrics } from "./x-text.js";
 import { Agent } from "@atproto/api";
 import { NodeOAuthClient } from "@atproto/oauth-client-node";
+import { createCheckoutSession, createPortalSession, processStripeWebhook } from "./billing.js";
 
 const PROVIDERS = {
   instagram: { name: "Instagram", limit: 2200, scopes: ["instagram_business_basic", "instagram_business_content_publish"] },
@@ -70,7 +71,7 @@ async function makeSession(user, env) {
   const signature = await crypto.subtle.sign("HMAC", await hmacKey(env.SESSION_SECRET), new TextEncoder().encode(input));
   return `${input}.${b64u(signature)}`;
 }
-async function authenticate(request, env, db, roles = []) {
+async function authenticate(request, env, db, roles = [], allowUnpaid = false) {
   const token = cookieValue(request, COOKIE) || (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
   if (!token) throw httpError("auth-required", 401);
   const [head, body, signature, ...extra] = token.split(".");
@@ -81,11 +82,12 @@ async function authenticate(request, env, db, roles = []) {
   let payload;
   try { payload = JSON.parse(new TextDecoder().decode(unb64u(body))); } catch { throw httpError("bad-token", 401); }
   if (!payload.exp || payload.exp <= Date.now() / 1000) throw httpError("bad-token", 401);
-  const user = await db.prepare("SELECT id,email,role,org_id,auth_version,is_active FROM users WHERE id=?").bind(payload.sub).first();
+  const user = await db.prepare("SELECT u.id,u.email,u.role,u.org_id,u.auth_version,u.is_active,o.billing_status,o.billing_period_start,o.billing_period_end,o.stripe_customer_id FROM users u LEFT JOIN organizations o ON o.id=u.org_id WHERE u.id=?").bind(payload.sub).first();
   if (!user) throw httpError("unknown-user", 401);
   if (user.is_active === 0) throw httpError("account-disabled", 401);
   if ((payload.ver || 0) !== (user.auth_version || 0)) throw httpError("bad-token", 401);
   if (roles.length && !roles.includes(user.role)) throw httpError("forbidden-role", 403);
+  if (env.INTERNAL_MODE !== "true" && user.org_id !== "klirline" && !allowUnpaid && !["active","trialing"].includes(user.billing_status)) throw httpError("subscription-required", 402);
   return user;
 }
 async function passwordHash(password, salt, iterations = 310000) {
@@ -125,8 +127,11 @@ function encryptionKey(env) {
   if (!/^[0-9a-f]{64}$/i.test(raw)) throw httpError("token-encryption-key-not-configured", 503);
   return crypto.subtle.importKey("raw", Uint8Array.from(raw.match(/.{2}/g), (x) => parseInt(x, 16)), "AES-GCM", false, ["encrypt", "decrypt"]);
 }
+function workspaceEnabled(env) {
+  return env.INTERNAL_MODE === "true" || env.ALLOW_PUBLIC_SIGNUP === "true";
+}
 function requireInternalWorkspace(env) {
-  if (env.INTERNAL_MODE !== "true") throw httpError("internal-workspace-disabled", 503);
+  if (!workspaceEnabled(env)) throw httpError("workspace-disabled", 503);
 }
 function workspaceLimit(env, key, fallback) {
   const value = Number(env[key]);
@@ -287,7 +292,7 @@ async function readJson(request) {
   }
   catch { throw httpError("invalid-json", 400); }
 }
-function userMetadata(row) { return { id: row.id, email: row.email, role: row.role, org: row.org_id }; }
+function userMetadata(row) { return { id: row.id, email: row.email, role: row.role, org: row.org_id, billingStatus: row.billing_status || "active" }; }
 async function requestFingerprint(userId, kind, data) {
   const canonical = JSON.stringify({ userId, kind, ...data });
   return b64u(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical)));
@@ -744,7 +749,10 @@ async function createSchedule(request, user, env, db) {
 }
 
 async function requireApprovedDraft(db,user,env,draftId,text,targets,mediaId) {
-  if (env.REQUIRE_APPROVED_DRAFTS !== "true") return null;
+  // Internal campaigns always require approval. The environment flag remains
+  // available for a future non-internal deployment, but cannot disable this
+  // safeguard for Klirline's shared workspace.
+  if (env.INTERNAL_MODE !== "true" && env.REQUIRE_APPROVED_DRAFTS !== "true") return null;
   if (!draftId) throw httpError("approved-campaign-draft-required",409);
   const draft=await db.prepare("SELECT id,text,targets_json,media_id,review_status,publication_state FROM campaign_drafts WHERE id=? AND org_id=?").bind(draftId,user.org_id).first();
   if (!draft) throw httpError("approved-campaign-draft-not-found",404);
@@ -866,13 +874,14 @@ function campaignDraftInput(body) {
 async function handle(request, env, ctx) {
   const url = new URL(request.url); const cors = corsHeaders(request, env);
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: secureHeaders(cors) });
-  if (request.method !== "GET" && request.method !== "HEAD") validateOrigin(request, env);
+  if (request.method !== "GET" && request.method !== "HEAD" && url.pathname !== "/api/stripe/webhook") validateOrigin(request, env);
   if (url.pathname.startsWith("/media/")) {
     const id = decodeURIComponent(url.pathname.slice("/media/".length)); const row = await env.DB.prepare("SELECT * FROM media WHERE id=? AND expires_at>? ").bind(id, nowIso()).first();
     if (!row) return new Response("Not found", { status: 404, headers: secureHeaders(cors) });
     const object = await env.MEDIA.get(row.object_key); if (!object) return new Response("Not found", { status: 404, headers: secureHeaders(cors) });
     return new Response(object.body, { headers: secureHeaders({ ...cors, "Content-Type": row.mime, "Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff" }) });
   }
+  if (url.pathname === "/api/stripe/webhook" && request.method === "POST") return json(await processStripeWebhook(env,env.DB,request),200,secureHeaders(cors));
   if (url.pathname === "/api/health" && request.method === "GET") {
     let database = false; let databaseSchema = false; let mediaStorage = false;
     try { database = Boolean(await env.DB?.prepare("SELECT 1 AS ready").first()); } catch {}
@@ -890,31 +899,73 @@ async function handle(request, env, ctx) {
       databaseSchema,
       mediaStorage,
       internalMode: env.INTERNAL_MODE === "true",
+      approvalGateConfigured: env.INTERNAL_MODE !== "true" || env.REQUIRE_APPROVED_DRAFTS === "true",
       sessionSecret: typeof env.SESSION_SECRET === "string" && env.SESSION_SECRET.length >= 32,
       tokenEncryptionKey: /^[0-9a-f]{64}$/i.test(String(env.TOKENS_ENCRYPTION_KEY_HEX || ""))
     };
+    if (env.INTERNAL_MODE !== "true") checks.billing = env.ALLOW_PUBLIC_SIGNUP === "true" && env.STRIPE_AUTOMATIC_TAX_ENABLED === "true" && Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PRICE_ID && env.STRIPE_WEBHOOK_SECRET);
     const ok = Object.values(checks).every(Boolean);
     return json({ ok, checks, providers: LAUNCH_PROVIDERS }, ok ? 200 : 503, secureHeaders(cors));
   }
   if (url.pathname === "/api/public-config" && request.method === "GET") {
     const internalMode = env.INTERNAL_MODE === "true";
-    return json({ internalMode, publicSignupEnabled: false, requireApprovedDrafts:env.REQUIRE_APPROVED_DRAFTS==="true" }, 200, secureHeaders(cors));
+    const publicSignupEnabled=!internalMode && env.ALLOW_PUBLIC_SIGNUP === "true" && env.STRIPE_AUTOMATIC_TAX_ENABLED === "true" && Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PRICE_ID && env.STRIPE_WEBHOOK_SECRET);
+    return json({ internalMode, publicSignupEnabled, requireApprovedDrafts:internalMode || env.REQUIRE_APPROVED_DRAFTS==="true", monthlyPrice:publicSignupEnabled?{amount:999,currency:"usd",interval:"month",unit:"workspace"}:null }, 200, secureHeaders(cors));
   }
   if (url.pathname === "/oauth/bluesky/client-metadata.json" && request.method === "GET") return json(blueskyClientMetadata(env), 200, secureHeaders(cors));
   if (url.pathname === "/api/providers" && request.method === "GET") return json(providerList(env), 200, secureHeaders(cors));
-  if (url.pathname === "/api/auth/bootstrap" && request.method === "GET") { const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first(); return json({ needsAdmin: !row?.count }, 200, secureHeaders(cors)); }
+  if (url.pathname === "/api/auth/bootstrap" && request.method === "GET") { const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE org_id='klirline'").first(); return json({ needsAdmin: (env.INTERNAL_MODE === "true" || env.KLIRLINE_BOOTSTRAP_ENABLED === "true") && !row?.count }, 200, secureHeaders(cors)); }
+  if (url.pathname === "/api/auth/signup" && request.method === "POST") {
+    if (env.INTERNAL_MODE === "true" || env.ALLOW_PUBLIC_SIGNUP !== "true" || env.STRIPE_AUTOMATIC_TAX_ENABLED !== "true" || !env.STRIPE_SECRET_KEY || !env.STRIPE_PRICE_ID || !env.STRIPE_WEBHOOK_SECRET) throw httpError("signup-disabled",404);
+    const body=await readJson(request); const email=String(body.email||"").trim().toLowerCase(); const password=String(body.password||""); const organizationName=String(body.organizationName||"").trim();
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError("invalid-email");
+    if(password.length<12 || password.length>200) throw httpError("password-too-short");
+    if(organizationName.length<2 || organizationName.length>100) throw httpError("invalid-organization-name");
+    if(body.acceptedTerms!==true) throw httpError("terms-acceptance-required",400);
+    if(await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(email).first()) throw httpError("email-already-registered",409);
+    if(!env.SESSION_SECRET || env.SESSION_SECRET.length<32) throw httpError("session-secret-not-configured",503);
+    const orgId=randomId(),id=randomId(),salt=randomId(16),hash=await passwordHash(password,salt),created=nowIso();
+    try { await env.DB.batch([
+      env.DB.prepare("INSERT INTO organizations(id,name,billing_status,created_at) VALUES(?,?,'inactive',?)").bind(orgId,organizationName,created),
+      env.DB.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) VALUES(?,?,?,?,'admin',?,?)").bind(id,email,salt,hash,orgId,created)
+    ]); } catch { throw httpError("email-already-registered",409); }
+    const user=await env.DB.prepare("SELECT u.id,u.email,u.role,u.org_id,u.auth_version,o.billing_status FROM users u JOIN organizations o ON o.id=u.org_id WHERE u.id=?").bind(id).first();
+    await auditEvent(env.DB,orgId,id,"billing.account.created",orgId,{email});
+    return json({user:userMetadata(user)},201,secureHeaders({...cors,"Set-Cookie":sessionCookie(await makeSession(user,env))}));
+  }
+  if (url.pathname === "/api/billing/status" && request.method === "GET") {
+    const user=await authenticate(request,env,env.DB,[],true);
+    const exempt=user.org_id==="klirline";
+    return json({status:exempt?"active":(user.billing_status||"inactive"),exempt,periodStart:user.billing_period_start||null,periodEnd:user.billing_period_end||null,manageBillingAvailable:!exempt&&Boolean(user.stripe_customer_id),price:{amount:999,currency:"usd",interval:"month",unit:"workspace"}},200,secureHeaders(cors));
+  }
+  if (url.pathname === "/api/billing/checkout" && request.method === "POST") {
+    const user=await authenticate(request,env,env.DB,["admin"],true);
+    const org=await env.DB.prepare("SELECT id,name,stripe_customer_id,billing_status FROM organizations WHERE id=?").bind(user.org_id).first();
+    if(["active","trialing"].includes(org?.billing_status)) throw httpError("subscription-already-active",409);
+    const session=await createCheckoutSession(env,org,user.email);
+    if(!session.url) throw httpError("stripe-checkout-url-missing",502);
+    return json({url:session.url},200,secureHeaders(cors));
+  }
+  if (url.pathname === "/api/billing/portal" && request.method === "POST") {
+    const user=await authenticate(request,env,env.DB,["admin"],true);
+    const org=await env.DB.prepare("SELECT id,name,stripe_customer_id,billing_status FROM organizations WHERE id=?").bind(user.org_id).first();
+    const session=await createPortalSession(env,org);
+    if(!session.url) throw httpError("stripe-portal-url-missing",502);
+    return json({url:session.url},200,secureHeaders(cors));
+  }
   if (url.pathname === "/api/auth/register" && request.method === "POST") {
-    const body = await readJson(request); const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
+    if(env.INTERNAL_MODE!=="true"&&env.KLIRLINE_BOOTSTRAP_ENABLED!=="true") throw httpError("bootstrap-disabled",404);
+    const body = await readJson(request); const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE org_id='klirline'").first();
     const email=String(body.email||"").trim().toLowerCase(); const password=String(body.password||"");
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError("invalid-email"); if (password.length < 12 || password.length > 200) throw httpError("password-too-short");
     if (count?.count) { await authenticate(request, env, env.DB, ["admin"]); throw httpError("team-members-not-supported", 403); }
     if (!env.BOOTSTRAP_ADMIN_KEY || !same(request.headers.get("X-Klirline-Bootstrap"), env.BOOTSTRAP_ADMIN_KEY)) throw httpError("invalid-bootstrap-key", 403);
     if (!env.SESSION_SECRET || env.SESSION_SECRET.length < 32) throw httpError("session-secret-not-configured",503);
     const id=randomId(); const salt=randomId(16); const hash=await passwordHash(password,salt);
-    try { await env.DB.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) SELECT ?,?,?,?,'admin','klirline',? WHERE NOT EXISTS(SELECT 1 FROM users)").bind(id,email,salt,hash,nowIso()).run(); }
+    try { await env.DB.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) SELECT ?,?,?,?,'admin','klirline',? WHERE NOT EXISTS(SELECT 1 FROM users WHERE org_id='klirline')").bind(id,email,salt,hash,nowIso()).run(); }
     catch { throw httpError("admin-already-created",409); }
     const user=await env.DB.prepare("SELECT id,email,role,org_id,auth_version FROM users WHERE id=?").bind(id).first(); if (!user) throw httpError("admin-already-created",409);
-    const token=await makeSession(user,env); return json({ user:userMetadata(user), first:true },201,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
+    const token=await makeSession(user,env); return json({ user:userMetadata({...user,billing_status:"active"}), first:true },201,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
   }
   if (url.pathname === "/api/auth/login" && request.method === "POST") {
     const body=await readJson(request); const email=String(body.email||"").trim().toLowerCase(); const password=String(body.password||""); if(password.length>200) throw httpError("invalid-credentials",401);
@@ -922,10 +973,11 @@ async function handle(request, env, ctx) {
     const candidate=await passwordHash(password,user?.password_salt||"AAAAAAAAAAAAAAAAAAAAAA");
     if (!user || user.is_active === 0 || !same(candidate,user.password_hash)) throw httpError("invalid-credentials",401);
     await clearLoginLimit(keys,env.DB);
-    const token=await makeSession(user,env); return json({ user:userMetadata(user) },200,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
+    const billingUser=await env.DB.prepare("SELECT u.id,u.email,u.role,u.org_id,u.auth_version,o.billing_status FROM users u LEFT JOIN organizations o ON o.id=u.org_id WHERE u.id=?").bind(user.id).first();
+    const token=await makeSession(user,env); return json({ user:userMetadata(billingUser) },200,secureHeaders({ ...cors, "Set-Cookie": sessionCookie(token) }));
   }
   if (url.pathname === "/api/auth/password" && request.method === "POST") {
-    const user = await authenticate(request,env,env.DB); const body = await readJson(request);
+    const user = await authenticate(request,env,env.DB,[],true); const body = await readJson(request);
     const row = await env.DB.prepare("SELECT password_salt,password_hash,auth_version FROM users WHERE id=?").bind(user.id).first();
     if (!row || !same(await passwordHash(String(body.currentPassword||""),row.password_salt),row.password_hash)) throw httpError("invalid-credentials",401);
     const nextPassword = String(body.newPassword||"");
@@ -938,25 +990,25 @@ async function handle(request, env, ctx) {
   }
   if (url.pathname === "/api/auth/logout" && request.method === "POST") return json({ok:true},200,secureHeaders({...cors,"Set-Cookie":clearCookie()}));
   if (url.pathname === "/api/team" && request.method === "GET") {
-    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    if (!workspaceEnabled(env)) throw httpError("not-found",404);
     const user = await authenticate(request,env,env.DB,["admin"]);
     const rows = await env.DB.prepare("SELECT id,email,role,is_active,created_at FROM users WHERE org_id=? ORDER BY created_at,email").bind(user.org_id).all();
     return json((rows.results||[]).map((row)=>({id:row.id,email:row.email,role:row.role,active:row.is_active===1,createdAt:row.created_at})),200,secureHeaders(cors));
   }
   if (url.pathname === "/api/audit" && request.method === "GET") {
-    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    if (!workspaceEnabled(env)) throw httpError("not-found",404);
     const user = await authenticate(request,env,env.DB,["admin"]);
     const rows = await env.DB.prepare("SELECT e.id,e.actor_user_id,u.email AS actor_email,e.event_type,e.target_id,e.details_json,e.created_at FROM audit_events e LEFT JOIN users u ON u.id=e.actor_user_id WHERE e.org_id=? ORDER BY e.created_at DESC LIMIT 100").bind(user.org_id).all();
     return json((rows.results||[]).map((row)=>({id:row.id,actorId:row.actor_user_id,actorEmail:row.actor_email||"Compte supprimé",type:row.event_type,targetId:row.target_id,details:JSON.parse(row.details_json||"{}"),createdAt:row.created_at})),200,secureHeaders(cors));
   }
   if (url.pathname === "/api/team/invitations" && request.method === "GET") {
-    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    if (!workspaceEnabled(env)) throw httpError("not-found",404);
     const user = await authenticate(request,env,env.DB,["admin"]);
     const rows = await env.DB.prepare("SELECT id,email,role,created_at,expires_at FROM team_invitations WHERE org_id=? AND used_at IS NULL AND expires_at>? ORDER BY created_at DESC").bind(user.org_id,nowIso()).all();
     return json(rows.results||[],200,secureHeaders(cors));
   }
   if (url.pathname === "/api/team/invitations" && request.method === "POST") {
-    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    if (!workspaceEnabled(env)) throw httpError("not-found",404);
     const user = await authenticate(request,env,env.DB,["admin"]); const body = await readJson(request);
     const email = String(body.email||"").trim().toLowerCase(); const role = String(body.role||"redacteur");
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError("invalid-email");
@@ -971,7 +1023,7 @@ async function handle(request, env, ctx) {
     return json({email,role,expiresAt,invitationUrl:inviteUrl.toString()},201,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/team/invitations/") && request.method === "DELETE") {
-    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    if (!workspaceEnabled(env)) throw httpError("not-found",404);
     const user = await authenticate(request,env,env.DB,["admin"]); const id = decodeURIComponent(url.pathname.split("/").at(-1));
     const result = await env.DB.prepare("DELETE FROM team_invitations WHERE id=? AND org_id=? AND used_at IS NULL").bind(id,user.org_id).run();
     if (!result.meta?.changes) throw httpError("not-found",404);
@@ -979,7 +1031,7 @@ async function handle(request, env, ctx) {
     return json({id,revoked:true},200,secureHeaders(cors));
   }
   if (url.pathname === "/api/team/accept" && request.method === "POST") {
-    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    if (!workspaceEnabled(env)) throw httpError("not-found",404);
     const body = await readJson(request); const token = String(body.token||""); const password = String(body.password||"");
     if (token.length < 32 || token.length > 128) throw httpError("invitation-invalid-or-expired",400);
     if (password.length < 12 || password.length > 200) throw httpError("password-too-short");
@@ -998,7 +1050,7 @@ async function handle(request, env, ctx) {
     return json({user:userMetadata(createdUser)},201,secureHeaders({...cors,"Set-Cookie":sessionCookie(session)}));
   }
   if (url.pathname.startsWith("/api/team/") && request.method === "DELETE") {
-    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    if (!workspaceEnabled(env)) throw httpError("not-found",404);
     const user = await authenticate(request,env,env.DB,["admin"]); const id = decodeURIComponent(url.pathname.split("/").at(-1));
     if (!id || id===user.id) throw httpError("cannot-disable-current-admin",409);
     const target = await env.DB.prepare("SELECT role,is_active FROM users WHERE id=? AND org_id=?").bind(id,user.org_id).first();
@@ -1009,7 +1061,7 @@ async function handle(request, env, ctx) {
     return json({id,active:false},200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/team/") && url.pathname.endsWith("/activate") && request.method === "POST") {
-    if (env.INTERNAL_MODE !== "true") throw httpError("not-found",404);
+    if (!workspaceEnabled(env)) throw httpError("not-found",404);
     const user = await authenticate(request,env,env.DB,["admin"]); const id = decodeURIComponent(url.pathname.split("/").at(-2));
     const target = await env.DB.prepare("SELECT role FROM users WHERE id=? AND org_id=?").bind(id,user.org_id).first();
     if (!target) throw httpError("not-found",404);
@@ -1020,8 +1072,8 @@ async function handle(request, env, ctx) {
   }
   if (url.pathname === "/api/usage" && request.method === "GET") {
     requireInternalWorkspace(env);
-    const user = await authenticate(request,env,env.DB);
-    return json({status:"internal",usage:await workspaceUsage(env.DB,user,env)},200,secureHeaders(cors));
+    const user = await authenticate(request,env,env.DB,[],true);
+    return json({status:env.INTERNAL_MODE==="true"?"internal":(user.billing_status||"inactive"),usage:await workspaceUsage(env.DB,user,env)},200,secureHeaders(cors));
   }  if (url.pathname === "/oauth/bluesky/start" && request.method === "POST") {
     const user=await authenticate(request,env,env.DB,["admin"]); const body=await readJson(request); const result=await blueskyOauthStart(user,body.handle,env,env.DB);
     return json({location:result.location},200,secureHeaders(cors));
@@ -1035,7 +1087,7 @@ async function handle(request, env, ctx) {
     try { await completeOAuth(request,env,env.DB); return new Response(null,{status:302,headers:{Location:`${allowedOrigins(env)[0]}#oauth-ok=${encodeURIComponent(url.pathname.split("/")[2])}`,"Set-Cookie":clearOAuthCookie(),"Cache-Control":"no-store"}}); }
     catch (error) { return new Response(`OAuth callback: ${String(error.message||error)}`,{status:error.status||500,headers:{"content-type":"text/plain; charset=utf-8","Cache-Control":"no-store","Set-Cookie":clearOAuthCookie()}}); }
   }
-  if (url.pathname === "/api/me" && request.method === "GET") return json({ user:userMetadata(await authenticate(request,env,env.DB)) },200,secureHeaders(cors));
+  if (url.pathname === "/api/me" && request.method === "GET") return json({ user:userMetadata(await authenticate(request,env,env.DB,[],true)) },200,secureHeaders(cors));
   if (url.pathname === "/api/connections" && request.method === "GET") {
     const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT c.provider,c.account_id,c.account_label,c.account_json,c.scopes_json,c.expires_at,c.created_at FROM connections c JOIN users owner ON owner.id=c.user_id WHERE owner.org_id=? ORDER BY c.provider,c.created_at DESC").bind(user.org_id).all();
     return json((rows.results||[]).map((r)=>({provider:r.provider,account:{...JSON.parse(r.account_json),id:r.account_id,label:r.account_label},scopes:JSON.parse(r.scopes_json),expiresAt:r.expires_at,createdAt:r.created_at})),200,secureHeaders(cors));
@@ -1142,7 +1194,7 @@ async function handle(request, env, ctx) {
     return json({ok:true,providerAuthorizationMustBeRevoked:true},200,secureHeaders(cors));
   }
   if (url.pathname === "/api/account" && request.method === "DELETE") {
-    await authenticate(request,env,env.DB);
+    await authenticate(request,env,env.DB,[],true);
     throw httpError("member-removal-managed-by-workspace-admin",409);
   }  return json({error:"not-found"},404,secureHeaders(cors));
 }
@@ -1151,7 +1203,7 @@ export default {
   async fetch(request, env, ctx) {
     try {
       const path = new URL(request.url).pathname;
-      if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "OPTIONS" ) validateOrigin(request,env);
+      if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "OPTIONS" && path !== "/api/stripe/webhook") validateOrigin(request,env);
       const response=await handle(request,env,ctx);
       const cors=corsHeaders(request,env); const headers=new Headers(response.headers); for (const [key,value] of Object.entries(secureHeaders(cors))) if (!headers.has(key) || key.startsWith("Access-Control-")) headers.set(key,value);
       return new Response(response.body,{status:response.status,statusText:response.statusText,headers});
