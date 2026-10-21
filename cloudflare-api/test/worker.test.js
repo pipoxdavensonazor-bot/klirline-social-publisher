@@ -76,6 +76,14 @@ test("auth, media, scheduling, publish idempotency, and account deletion", async
   assert.equal(upload.status, 201);
   assert.equal(ctx.objects.size, 1);
 
+  ctx.sqlite.prepare("UPDATE media SET expires_at=? WHERE id=?").run(new Date(Date.now() + 60 * 60 * 1000).toISOString(), media.id);
+  const expiringMediaSchedule = await ctx.request("/api/scheduled", "POST", {
+    text: "Klirline", targets: ["instagram"], mediaId: media.id, runAtUTC: new Date(Date.now() + 58 * 60 * 1000).toISOString()
+  }, { Cookie: cookie });
+  assert.equal(expiringMediaSchedule.status, 400);
+  assert.equal((await expiringMediaSchedule.json()).error, "scheduled-media-expires-too-soon");
+  ctx.sqlite.prepare("UPDATE media SET expires_at=? WHERE id=?").run(new Date(Date.now() + 30 * 86400000).toISOString(), media.id);
+
   const schedule = { text: "Klirline", targets: ["instagram"], mediaId: media.id, runAtUTC: new Date(Date.now() + 120000).toISOString() };
   const queued = await ctx.request("/api/scheduled", "POST", schedule, { Cookie: cookie, "Idempotency-Key": "schedule-once" });
   const queuedJob = (await queued.json()).job;

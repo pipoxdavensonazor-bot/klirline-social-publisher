@@ -403,7 +403,12 @@ async function createSchedule(request, user, env, db) {
   const runAt = new Date(body.runAtUTC);
   if (!text || !targets.length || !body.runAtUTC || !Number.isFinite(runAt.getTime()) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(body.runAtUTC) || runAt.getTime() < Date.now() + 60000) throw httpError("text-targets-future-runAtUTC-required");
   for (const provider of targets) { if (text.length > PROVIDERS[provider].limit) throw httpError(`too-long:${provider}`); if (["instagram"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`); }
-  if (body.mediaId && !(await getMedia(db, body.mediaId, user.id))) throw httpError("media-not-found", 404);
+  if (body.mediaId) {
+    const media = await getMedia(db, body.mediaId, user.id);
+    if (!media) throw httpError("media-not-found", 404);
+    // Keep the media available through the scheduled send and the worker's retry window.
+    if (runAt.getTime() >= new Date(media.expires_at).getTime() - 3 * 60 * 60 * 1000) throw httpError("scheduled-media-expires-too-soon");
+  }
   const idem = String(request.headers.get("Idempotency-Key") || "").slice(0, 128) || null;
   const fingerprint = idem ? await requestFingerprint(user.id, "schedule", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, runAtUTC: runAt.toISOString() }) : null;
   if (idem) { const prior = await db.prepare("SELECT * FROM scheduled_posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); return { job: await scheduleView(db, prior), deduped: true }; } }
