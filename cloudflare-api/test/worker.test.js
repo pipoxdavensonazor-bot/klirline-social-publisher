@@ -385,13 +385,13 @@ test("expired schedule leases require review instead of retrying an uncertain pu
   assert.ok(audit.some((event) => event.type === "publication.schedule.recovery-required" && event.targetId === job.id));
 });
 
-test("OAuth fallback account cap matches the nine-account workspace limit", async () => {
-  const ctx = fixture({ PLAN_MAX_ACCOUNTS: "invalid" });
+test("internal account capacity supports regional profiles without subscription limits", async () => {
+  const ctx = fixture({ WORKSPACE_MAX_CONNECTED_ACCOUNTS: "invalid" });
   const cookie = await bootstrap(ctx);
   const usage = await (await ctx.request("/api/usage", "GET", null, { Cookie: cookie })).json();
-  assert.equal(usage.usage.connectedAccountLimit, 9);
+  assert.equal(usage.usage.connectedAccountLimit, 100);
   const userId = ctx.sqlite.prepare("SELECT id FROM users WHERE email=?").get("owner@klirline.ca").id;
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 10; i++) {
     ctx.sqlite.prepare("INSERT INTO connections(id,user_id,provider,account_id,account_label,token_ciphertext,token_iv,created_at) VALUES(?,?,?,?,?,?,?,?)")
       .run(`connection-${i}`, userId, `existing-${i}`, `account-${i}`, `Account ${i}`, "ciphertext", "iv", new Date().toISOString());
   }
@@ -401,7 +401,7 @@ test("OAuth fallback account cap matches the nine-account workspace limit", asyn
 });
 
 test("LinkedIn OAuth accepts approved publishing roles and rejects unrelated roles", async () => {
-  const ctx = fixture({ PLAN_MAX_ACCOUNTS: "1" });
+  const ctx = fixture({ WORKSPACE_MAX_CONNECTED_ACCOUNTS: "1" });
   const adminCookie = await bootstrap(ctx);
   const originalFetch = globalThis.fetch;
   let organizationRole = "ADMINISTRATOR";
@@ -455,7 +455,7 @@ test("publication adapters send image posts to Instagram, Facebook Page, LinkedI
     META_APP_ID: "meta-client", META_APP_SECRET: "meta-secret",
     INSTAGRAM_REDIRECT_URI: "https://api.test/oauth/instagram/callback",
     FACEBOOK_REDIRECT_URI: "https://api.test/oauth/facebook/callback", FACEBOOK_PAGE_ID: "page-123",
-    LINKEDIN_ORGANIZATION_NAME: "Klirline Inc.", THREADS_APP_ID:"threads-client",THREADS_APP_SECRET:"threads-secret",THREADS_REDIRECT_URI:"https://api.test/oauth/threads/callback", X_CLIENT_ID:"x-client",X_CLIENT_SECRET:"x-secret",X_REDIRECT_URI:"https://api.test/oauth/x/callback", PINTEREST_APP_ID:"pinterest-client",PINTEREST_APP_SECRET:"pinterest-secret",PINTEREST_REDIRECT_URI:"https://api.test/oauth/pinterest/callback",PLAN_MAX_ACCOUNTS:9
+    LINKEDIN_ORGANIZATION_NAME: "Klirline Inc.", THREADS_APP_ID:"threads-client",THREADS_APP_SECRET:"threads-secret",THREADS_REDIRECT_URI:"https://api.test/oauth/threads/callback", X_CLIENT_ID:"x-client",X_CLIENT_SECRET:"x-secret",X_REDIRECT_URI:"https://api.test/oauth/x/callback", PINTEREST_APP_ID:"pinterest-client",PINTEREST_APP_SECRET:"pinterest-secret",PINTEREST_REDIRECT_URI:"https://api.test/oauth/pinterest/callback",WORKSPACE_MAX_CONNECTED_ACCOUNTS:100
   });
   const cookie = await bootstrap(ctx);
   const calls = [];

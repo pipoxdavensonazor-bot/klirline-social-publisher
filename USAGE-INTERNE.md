@@ -17,7 +17,7 @@
 
 Le pilote API permet la publication et la programmation vers Instagram professionnel, une Page Facebook, une Page LinkedIn, Threads, X et Pinterest, sous réserve des accès développeur et autorisations réels. X accepte texte et images JPEG/PNG jusqu’à 5 Mo; Pinterest publie une image dans le tableau choisi par l’administrateur. Les essais locaux utilisent des réponses fournisseur simulées; les publications réelles doivent être validées sur les comptes Klirline. TikTok et Bluesky ne sont pas implémentés dans le Worker; Twitch n’est pas un canal de publication générique. L’app indique le résultat par destination; une erreur ou une action requise doit être traitée avant de considérer une campagne diffusée. Si une programmation affiche que le résultat de l’envoi est incertain après une interruption du Worker, vérifiez d’abord le compte social concerné. Ne relancez pas avant d’avoir vérifié si le réseau a déjà créé la publication, afin d’éviter un doublon.
 
-Les limites serveur configurées pour le mode interne sont de 9 comptes et 5 000 publications par mois. Elles servent de garde-fous techniques.
+Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 publications par mois (`WORKSPACE_MAX_CONNECTED_ACCOUNTS` et `WORKSPACE_MONTHLY_PUBLICATION_CAP`). Ce sont des garde-fous techniques configurables, pas des forfaits ou des limites de facturation.
 
 ## Processus de campagne multi-pays
 

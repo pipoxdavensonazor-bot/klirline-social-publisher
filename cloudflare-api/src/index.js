@@ -14,7 +14,9 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["posts", "campaign_draft_id"],
   ["scheduled_posts", "campaign_draft_id"]
 ];
-const DEFAULT_MAX_ACCOUNTS = 9;
+// Internal operational ceiling, not a subscription entitlement. Keep it high
+// enough for regional and brand accounts while preventing accidental abuse.
+const DEFAULT_MAX_ACCOUNTS = 100;
 const NON_ISO_REGION_CODES = new Set(["AC", "CP", "DG", "EA", "EU", "EZ", "IC", "QO", "TA", "UK", "UN", "XK"]);
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
@@ -123,7 +125,7 @@ function encryptionKey(env) {
 function requireInternalWorkspace(env) {
   if (env.INTERNAL_MODE !== "true") throw httpError("internal-workspace-disabled", 503);
 }
-function planLimit(env, key, fallback) {
+function workspaceLimit(env, key, fallback) {
   const value = Number(env[key]);
   return Number.isSafeInteger(value) && value > 0 && value <= 100000 ? value : fallback;
 }
@@ -140,7 +142,7 @@ function usagePeriodKey() {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
 }
 async function reserveMonthlyPublication(db, user, env) {
-  const period = usagePeriodKey(); const limit = planLimit(env, "PLAN_MONTHLY_POST_LIMIT", 5000);
+  const period = usagePeriodKey(); const limit = workspaceLimit(env, "WORKSPACE_MONTHLY_PUBLICATION_CAP", 5000);
   const row = await db.prepare(`INSERT INTO usage_counters(org_id,period_key,publication_count) VALUES(?,?,1)
     ON CONFLICT(org_id,period_key) DO UPDATE SET publication_count=publication_count+1
     WHERE publication_count<? RETURNING publication_count`).bind(user.org_id, period, limit).first();
@@ -158,7 +160,7 @@ async function workspaceUsage(db, user, env) {
     db.prepare("SELECT publication_count FROM usage_counters WHERE org_id=? AND period_key=?").bind(user.org_id, period).first(),
     db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id IN (SELECT id FROM users WHERE org_id=?)").bind(user.org_id).first()
   ]);
-  return { periodStart: period, publications: usage?.publication_count || 0, publicationLimit: planLimit(env, "PLAN_MONTHLY_POST_LIMIT", 5000), connectedAccounts: accounts?.count || 0, connectedAccountLimit: planLimit(env, "PLAN_MAX_ACCOUNTS", DEFAULT_MAX_ACCOUNTS) };
+  return { periodStart: period, publications: usage?.publication_count || 0, publicationLimit: workspaceLimit(env, "WORKSPACE_MONTHLY_PUBLICATION_CAP", 5000), connectedAccounts: accounts?.count || 0, connectedAccountLimit: workspaceLimit(env, "WORKSPACE_MAX_CONNECTED_ACCOUNTS", DEFAULT_MAX_ACCOUNTS) };
 }
 async function sealToken(value, env) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -252,7 +254,7 @@ async function oauthStart(provider, user, env, db) {
   const current = await db.prepare("SELECT id FROM connections WHERE provider=? AND user_id IN (SELECT id FROM users WHERE org_id=?) LIMIT 1").bind(provider, user.org_id).first();
   if (!current) {
     const count = await db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id IN (SELECT id FROM users WHERE org_id=?)").bind(user.org_id).first();
-    if (count?.count >= planLimit(env, "PLAN_MAX_ACCOUNTS", DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached", 429);
+    if (count?.count >= workspaceLimit(env, "WORKSPACE_MAX_CONNECTED_ACCOUNTS", DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached", 429);
   }
   const cfg = providerEnv(provider, env);
   if (!cfg.id || !cfg.secret || !cfg.redirect || !env.FRONTEND_ORIGIN || !env.PUBLIC_BASE_URL) throw httpError("missing-credentials", 503);
