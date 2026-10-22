@@ -1,24 +1,37 @@
 # Klirline Social Publisher
 
-Prototype de planification et de gestion de publications sociales pour Klirline. L’interface se sert depuis `index.html`; elle fonctionne localement en mode manuel et peut appeler l’API configurée dans **Préférences → Backend et compte**. `cloudflare-api/` contient désormais une première implémentation Cloudflare Workers avec D1 et R2. `klirline-social-backend/` conserve l’ancien backend Node/Express de référence.
+Klirline Social Publisher est un outil interne pour préparer, faire approuver, programmer et suivre les promotions Klirline par pays, langue, fuseau horaire et compte social. Il n'est pas vendu et ne comporte ni abonnement ni paiement.
 
-## Statut et mode interne
+## État actuel
 
-Klirline Social Publisher est un outil interne de promotion de Klirline; il n’est pas vendu et ne requiert pas de paiement ni d’abonnement. Le Worker API Cloudflare est configuré avec `INTERNAL_MODE=true`: l’administrateur peut inviter des rédacteurs ou lecteurs par lien à usage unique; les connexions, médias, publications et programmations sont partagés dans l’espace. L’inscription publique reste fermée. Le Worker frontend doit également être protégé derrière Cloudflare Access avant que l’URL de production soit communiquée à l’équipe.
+- Le frontend Cloudflare Workers sert l'application depuis `index.html`; `site/` est généré par `npm run build`.
+- L'API Cloudflare Worker séparée se trouve dans [`cloudflare-api/`](cloudflare-api/), avec D1, R2, migrations et un Cron de publication.
+- Le domaine de production de l'API répond. Le contrôle `/api/health` indique que la base et le stockage répondent, mais que les secrets de session et de chiffrement ne passent pas encore leur validation. L'API ne peut donc pas encore servir les connexions ou publications réelles.
+- Les identifiants d'applications OAuth et le consentement des comptes sociaux restent à configurer. Les intégrations sont testées avec des fournisseurs simulés; aucune publication sur un vrai compte n'est validée par ces tests.
+- L'état de déploiement des Workers, Cloudflare Access, migrations et secrets doit être vérifié dans [`CLOUDFLARE-DEPLOIEMENT.md`](CLOUDFLARE-DEPLOIEMENT.md). La branche `commercial-readiness` n'est pas automatiquement la version frontend en production.
 
-L’espace a des plafonds opérationnels configurables (`WORKSPACE_MAX_CONNECTED_ACCOUNTS=100`, `WORKSPACE_MONTHLY_PUBLICATION_CAP=5000`) pour protéger le service contre les erreurs et les abus. Ils ne définissent aucun forfait; les capacités peuvent être ajustées à la charge réelle de l’équipe.
+## Canaux pris en charge
 
-Le pilote Cloudflare couvre les publications texte/image vers Instagram professionnel, Pages Facebook, Pages LinkedIn, Threads, X, Pinterest et Bluesky. L’espace peut gérer plusieurs comptes d’un même réseau : Facebook et LinkedIn enregistrent les Pages sur lesquelles le titulaire OAuth peut publier; pour les autres réseaux, un administrateur peut relancer OAuth pour chaque compte. Une campagne peut viser tous les comptes d’un réseau ou des comptes régionaux précis. Bluesky utilise OAuth officiel avec PKCE/DPoP et stocke ses sessions chiffrées dans D1; les images acceptées sont JPEG/PNG de 2 Mo maximum et exigent un texte alternatif. TikTok reste manuel selon les limites du partage d’applications internes; Twitch n’est pas un canal de publication générique. Les fournisseurs sont testés avec réponses simulées, mais ne sont pas validés sur les vrais comptes ni déployés. L’administrateur seul connecte/déconnecte les comptes sociaux; les rédacteurs publient et programment depuis les connexions partagées. Les programmations enregistrent un fuseau horaire IANA par destination. Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 publications par mois. L’application reste configurée comme outil interne sans inscription publique ni facturation. Un journal d’activité d’administration est disponible dans Préférences. Le serveur Node/Express historique est une référence de développement, pas un service de production.
+Le Worker comporte des parcours de publication texte/image pour Instagram professionnel, Pages Facebook, Pages LinkedIn, Threads, X, Pinterest et Bluesky. Les autorisations de fournisseur, les formats et les comptes accessibles déterminent ce qui fonctionnera réellement. Bluesky utilise OAuth officiel et DPoP; une image doit être JPEG/PNG de 2 Mo maximum avec un texte alternatif.
 
-## Démarrer le prototype
+TikTok reste un parcours manuel dans le pilote interne. Twitch ne fournit pas de publication promotionnelle générique; utilisez les fonctions propres à la chaîne. Dans l'interface, ajouter un lien de profil seul ne connecte pas le compte et ne permet pas de publier.
 
-Ouvrir `index.html` dans un navigateur pour utiliser la préparation locale. Le frontend Worker Static Assets se construit avec `npm run build` et `npm run deploy`; son `wrangler.jsonc` sert uniquement la liste publique de `site/`. Pour installer l’API Worker distincte, suivre [`CLOUDFLARE-DEPLOIEMENT.md`](CLOUDFLARE-DEPLOIEMENT.md); son code se trouve dans [`cloudflare-api/`](cloudflare-api/). Le backend Node de référence est décrit dans [`klirline-social-backend/README.md`](klirline-social-backend/README.md).
+Plusieurs comptes peuvent être associés à un réseau. Un administrateur gère les connexions sociales; les rédacteurs préparent et programment les publications depuis les comptes partagés; les lecteurs consultent. En mode interne, le Worker exige un brouillon approuvé dont le texte, les destinations et le média correspondent exactement à la publication demandée.
 
-## Plan d’usage et informations à compléter
+## Développement et déploiement
 
-- [`USAGE-INTERNE.md`](USAGE-INTERNE.md) : processus de campagne et écarts avant usage régulier par l’équipe.
-- [`privacy.html`](privacy.html), [`terms.html`](terms.html), [`deletion.html`](deletion.html) : pages à aligner sur les pratiques réelles, notamment pour les revues des plateformes et demandes de suppression.
-- [`GUIDE-CAMPAGNES-INTERNATIONALES.md`](GUIDE-CAMPAGNES-INTERNATIONALES.md) : méthode de campagne par pays/langue, modes de publication et contrôles de lancement interne.
-- [`klirline-social-backend/AUDIT.md`](klirline-social-backend/AUDIT.md) : audit technique et limites des intégrations.
+- Ouvrir `index.html` pour le mode de préparation locale; les profils et brouillons locaux restent dans ce navigateur.
+- Construire les ressources frontend avec `npm run build`.
+- Déployer le frontend uniquement selon le processus de production documenté. Ne pas utiliser la configuration de l'API pour remplacer le Worker frontend.
+- Déployer l'API séparément depuis `cloudflare-api/`; suivre [`CLOUDFLARE-DEPLOIEMENT.md`](CLOUDFLARE-DEPLOIEMENT.md) et ne jamais enregistrer les secrets dans Git.
+- Lancer `node scripts/check-project.mjs` pour vérifier la configuration du projet et, dans `cloudflare-api/`, `pnpm test` pour les parcours API simulés.
 
-Avant l’usage opérationnel, déployer l’API sous des domaines maîtrisés par Klirline, confirmer les secrets et accès OAuth, appliquer toutes les migrations jusqu’à 0015, inviter les employés avec leurs comptes individuels et faire des publications de test contrôlées. Les brouillons peuvent être partagés avec un pays, une langue, un fuseau horaire et les comptes régionaux exacts; `REQUIRE_APPROVED_DRAFTS=true` impose leur approbation avant publication API ou programmation automatique. Mettre en place les sauvegardes et alertes, puis tester les procédures de campagne dans chaque région.
+## Guides internes
+
+- [`USAGE-INTERNE.md`](USAGE-INTERNE.md) : rôles, sécurité et processus de campagne.
+- [`GUIDE-CAMPAGNES-INTERNATIONALES.md`](GUIDE-CAMPAGNES-INTERNATIONALES.md) : adaptations pays/langue et publication.
+- [`privacy.html`](privacy.html), [`terms.html`](terms.html), [`deletion.html`](deletion.html) : avis légaux à maintenir selon les pratiques réelles.
+- [`RECHERCHE-CONNEXIONS-SOCIALES.md`](RECHERCHE-CONNEXIONS-SOCIALES.md) : portée et contraintes des intégrations.
+- [`klirline-social-backend/`](klirline-social-backend/) : ancien backend Node/Express conservé pour référence historique; ce n'est pas le service déployé.
+
+Les plafonds opérationnels par défaut (`WORKSPACE_MAX_CONNECTED_ACCOUNTS=100`, `WORKSPACE_MONTHLY_PUBLICATION_CAP=5000`) sont des garde-fous configurables, pas des forfaits commerciaux.
