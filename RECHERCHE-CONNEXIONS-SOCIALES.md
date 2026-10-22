@@ -1,32 +1,61 @@
 # Revue et recherche : connexions sociales Klirline
+**Date de vérification initiale : 20 octobre 2026**
+**Objectif actuel :** outil interne Klirline pour préparer et diffuser les promotions de l’entreprise, sans vente d’abonnement.
 
-**Date de vérification : 20 octobre 2026**  
-**Objectif :** connecter les neuf profils Klirline fournis, choisir les destinations et publier depuis une seule interface.
+## État d’implémentation — 21 octobre 2026
 
+L’analyse de prérequis ci-dessous est historique. Depuis sa rédaction, le pilote Cloudflare a ajouté l’OAuth AT Protocol et la publication Bluesky : session D1 chiffrée, création de post texte, image JPEG/PNG de 2 Mo maximum, texte alternatif et limites par destination. Bluesky est donc implémenté dans le code, mais son authentification n’a pas été validée sur le compte Klirline. TikTok reste un parcours manuel pour l’outil interne conformément aux limites relevées dans cette recherche. La migration 0015 ajoute plusieurs comptes du même réseau et des destinations de compte explicites aux publications/programmations. L’API Cloudflare est maintenant déployée séparément du frontend. Au contrôle du 21 octobre 2026, `/api/health` confirme D1, le schéma, R2, le mode interne, l’approbation, la session, le chiffrement et la préparation du bootstrap; cela ne prouve pas encore qu’un administrateur, un OAuth réel ou une publication de compte Klirline fonctionne.
+
+## Vérification des prérequis TikTok et Bluesky — 21 octobre 2026
+
+- **TikTok : ne pas développer de publication automatique pour cet outil interne.** Les règles officielles du Content Posting API disent qu’un client ne peut pas être limité à une équipe interne/privée et citent explicitement comme cas non acceptable un utilitaire qui téléverse vers des comptes gérés par l’équipe. Le Direct Post non audité est en outre limité à cinq créateurs par fenêtre de 24 h et aux comptes privés avec une visibilité `SELF_ONLY`. Une revue ne change pas l’inadmissibilité d’un outil réservé à Klirline. Garder l’ajout de profil et la préparation manuelle, avec confirmation dans TikTok. Si un futur produit destiné à une large audience est envisagé, réévaluer séparément ses règles, sa revue et son interface avant tout code. [Règles de partage TikTok](https://developers.tiktok.com/docs/en/content-sharing-guidelines), [démarrage Direct Post](https://developers.tiktok.com/docs/en/content-posting-api-get-started).
+- **Bluesky : l’authentification ne passe pas par un secret d’app de Developer Console.** Le protocole demande un `client_id` HTTPS qui pointe vers des métadonnées publiques, la découverte du PDS, OAuth Authorization Code avec PKCE/PAR et DPoP. Le Worker implémente ce flux, stocke les sessions chiffrées en D1 et crée des posts texte/image. Les tests couvrent les métadonnées et les adaptateurs simulés; il reste à vérifier le vrai consentement, les limites de production et le fonctionnement avec les bindings Cloudflare réellement configurés. Ne jamais collecter le mot de passe principal. [Spécification OAuth AT Protocol](https://atproto.com/specs/oauth), [guide OAuth](https://atproto.com/guides/about-oauth), [création d’un post](https://docs.bsky.app/docs/tutorials/creating-a-post), [compatibilité Node.js de Cloudflare Workers](https://developers.cloudflare.com/workers/runtime-apis/nodejs/).
+- **État de conformité du dépôt :** le mode interne ferme l’inscription publique et exige un brouillon partagé approuvé pour les envois API; TikTok reste manuel. Ces points doivent rester visibles dans l’interface et dans le préflight de production. Les liens de profils ne donnent aucune autorisation OAuth.
+
+## Addendum — état du dépôt au 21 octobre 2026
+La revue initiale ci-dessous décrivait le prototype avant l’ajout du Worker Cloudflare. Elle ne décrit plus l’état courant à elle seule.
+| Niveau | État vérifié dans le dépôt | Ce que cela signifie |
+|---|---|---|
+| Interface sans serveur | Les neuf profils peuvent être ajoutés comme liens dans le navigateur | Cela prépare une publication manuelle; le lien ne connecte pas le compte et l’application ne peut pas publier sur la seule base de l’URL. |
+| Worker Cloudflare | Le Worker API est déployé séparément; `/api/health` confirme les bindings D1/R2 et les garde-fous internes. `/api/providers` confirme Bluesky `ready`, les identifiants Meta/LinkedIn/X/Threads/Pinterest `missing-credentials`, et TikTok/Twitch `out-of-scope`. | L’OAuth et la publication sont codés pour sept réseaux, mais aucun compte Klirline ni post réel n’est validé. TikTok reste manuel et Twitch n’a pas de publication générique. |
+| Équipe interne | Administrateur, invitations à usage unique, rôles rédacteur/lecteur, révocation des accès et ressources d’espace partagées | Les brouillons et médias du mode sans serveur restent locaux; le stockage partagé requiert le Worker API opérationnel. |
+| Exploitation | Le contrôle `/api/health` confirme le schéma distant, les migrations jusqu’à 0015, D1 et R2; les brouillons partagés, relecture, destinations régionales et programmation IANA sont dans le Worker. | Les sauvegardes/restaurations, alertes et essais avec de vrais comptes restent à valider; en mode interne, l’API impose toujours un brouillon partagé approuvé correspondant exactement au texte, aux comptes de destination et au média. |
+| Hors publication automatique | TikTok reste manuel pour l’usage interne; Twitch n’est pas un canal de publication promotionnelle générique | Préparer puis confirmer la publication dans l’application du réseau. Les liens de profil ne connectent pas les comptes. |
+Le Worker reste un pilote tant que les essais avec les comptes réels ne sont pas terminés. Le contrôle de santé actuel ne signale aucun défaut de binding ou de schéma, et le domaine API répond. Les identifiants OAuth manquants, permissions fournisseur et consentements des comptes restent à établir; Access et les exceptions WAF des origines de preview sont configurés. La règle `Challenge API Spam` est désormais limitée à `social-api.klirline.ca`; ses exceptions de preview restent exactes. Le plafond configurable de 5 000 publications/mois est un garde-fou interne, pas un quota garanti par les plateformes.
+### Réévaluation des plateformes
+- **Instagram / Facebook:** conserver le périmètre API actuel, mais confirmer qu’Instagram est un compte professionnel et que le compte Facebook de production est bien une Page autorisée. Une URL `/profile.php?id=…` ou `/people/…` seule ne prouve pas que la destination est une Page. Une Page, les rôles/permissions Meta et une app approuvée sont nécessaires pour publier via l’API officielle.
+- **LinkedIn:** le code recense les organisations pour lesquelles le membre OAuth détient un rôle approuvé de publication et sait envoyer texte/image à la Page sélectionnée. L’accès Community Management, les scopes accordés et le statut de chaque organisation doivent être approuvés par LinkedIn. Le versionnement Marketing évolue; le code actuel utilise `202610` et doit être revérifié avant déploiement.
+- **X:** le Worker implémente maintenant OAuth 2.0/PKCE, jeton renouvelable, profil `/2/users/me`, posts texte et images JPEG/PNG (jusqu’à 5 Mo). Le test local simule les endpoints officiels; il faut encore un projet/app autorisé, des identifiants réels, confirmer l’accès API et vérifier les quotas/coûts proposés dans le compte développeur.
+- **Threads:** l’adaptateur Worker utilise OAuth, rafraîchit les jetons et publie texte et images. Les posts texte utilisent `auto_publish_text`; les images suivent la création d’un conteneur puis sa publication. Il reste à tester l’app Threads approuvée et le vrai compte. Les vidéos, carrousels et options avancées ne sont pas implémentés.
+- **Pinterest:** le Worker implémente OAuth code grant avec refresh, scopes minimaux `boards:read` et `pins:write`, liste paginée des tableaux et sélection d’un tableau par l’administrateur. Il publie des Pins image avec URL média publique et description jusqu’à 800 caractères. Il faut encore enregistrer/configurer l’app et confirmer l’accès développeur; l’accès Trial peut restreindre la visibilité du contenu. Les vidéos ne sont pas implémentées.
+- **Bluesky:** l’adaptateur du Worker utilise OAuth AT Protocol, métadonnées client HTTPS, PKCE/PAR et DPoP; il crée des posts texte et des images JPEG/PNG (2 Mo maximum, texte alternatif requis). Les appels fournisseur sont simulés en test; il faut encore valider le consentement sur le vrai compte et les exigences opérationnelles HTTPS en production. Ne jamais demander le mot de passe principal.
+- **TikTok:** Content Posting API propose Direct Post et le flux de brouillon, avec `video.publish`, accès approuvé, informations du créateur, domaines média vérifiés et audit pour une diffusion publique. Cependant, les consignes officielles de partage de contenu n’autorisent pas les outils destinés à un groupe privé/interne et citent l’envoi vers des comptes gérés par l’équipe comme usage non admissible. Comme Klirline Social est actuellement un outil interne pour les comptes de Klirline, ne pas activer l’API TikTok dans ce périmètre; garder la préparation et la confirmation manuelles. Réévaluer seulement si l’audience et l’usage du produit changent, puis demander une validation officielle à TikTok.
+- **Twitch:** l’API propose des actions de chaîne et des clips liés au direct/VOD, pas un fil de posts promotionnels génériques. À traiter comme un outil distinct de création/annonce de clips, si Klirline confirme ce besoin.
+### Source supplémentaire vérifiée
+- LinkedIn Posts API et rôles requis: <https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api>
+- LinkedIn Community Management tiers/revue: <https://learn.microsoft.com/en-us/linkedin/marketing/community-management/community-management-api-migration-guide>
+- Pinterest création de Pins: <https://developers.pinterest.com/docs/work-with-organic-content-and-users/create-boards-and-pins/>; niveaux d’accès: <https://developers.pinterest.com/docs/key-concepts/access-tiers/>
+- Threads API officiel Meta sur Postman: <https://www.postman.com/meta/threads/documentation/dht3nzz/threads-api>
+- Bluesky création d’un post: <https://docs.bsky.app/docs/tutorials/creating-a-post>
+- TikTok Direct Post et audit: <https://developers.tiktok.com/docs/en/content-posting-api-get-started>
+- TikTok Content Sharing Guidelines (restriction d’usage interne/équipe): <https://developers.tiktok.com/docs/en/content-sharing-guidelines/>
+- Twitch API clips et scope: <https://dev.twitch.tv/docs/api/clips/>
 ## Conclusion
-
-Le produit souhaité est faisable pour plusieurs réseaux, mais les liens publics fournis ne suffisent pas à connecter les comptes. Chaque plateforme doit confirmer que le propriétaire du compte autorise l’application à agir. L’expérience peut rester simple pour Klirline : bouton **Connecter**, connexion chez le réseau, écran de consentement, retour dans l’application. La partie technique utilise tout de même OAuth et les API officielles en arrière-plan.
-
-Il ne faut pas demander ni stocker les mots de passe des réseaux. Il ne faut pas non plus automatiser le navigateur connecté pour contourner les règles des plateformes : ce mécanisme est fragile et peut compromettre les comptes. Le frontend actuel est un prototype local, pas encore une application OAuth.
-
+Pour l’outil interne, le parcours automatique est implémenté dans le pilote pour sept réseaux via OAuth officiel; le propriétaire ou administrateur du compte consent lui-même. Les liens publics ne suffisent pas à connecter les comptes. TikTok reste en publication manuelle en raison des règles d’usage interne du Content Posting API; Twitch ne fournit pas de flux générique de posts promotionnels.
+Ne jamais demander ni stocker les mots de passe des réseaux et ne pas automatiser le navigateur pour contourner leurs contrôles. Le code et les tests simulés ne prouvent ni une approbation d’application ni une publication réelle : l’API, les domaines, les secrets, les consentements et les essais contrôlés restent nécessaires.
 ## Revue de l’application actuelle
-
-Le projet contient une page statique `index.html`. Elle sert à présenter l’éditeur, mais ne réalise aucune connexion d’identité.
-
+Cette revue initiale décrivait le prototype statique avant le Worker. Elle est conservée comme historique; les constats ci-dessous ne décrivent pas l’état actuel.
 | Constat | Effet actuel | Travail nécessaire |
 |---|---|---|
-| Cinq réseaux seulement dans l’interface | Threads, Pinterest, Bluesky et Twitch manquent | Ajouter les neuf intégrations et leurs états propres |
+| Neuf réseaux affichés dans le prototype | Sept ont un adaptateur OAuth/publication dans le Worker; TikTok reste manuel et Twitch n’offre pas de post promotionnel générique | Valider les comptes et autorisations réels; garder les limites visibles dans l’interface |
 | Les profils entrés sont stockés dans `localStorage` | Le profil n’est ni vérifié ni connecté; les données restent sur ce navigateur | Créer une session utilisateur et enregistrer des connexions vérifiées côté serveur |
 | Les URL de profil sont enregistrées, mais non utilisées pour authentifier ou publier | N’importe qui peut saisir un lien; aucun droit de publication n’est accordé | Remplacer ce champ par un vrai flux « Connecter avec … » |
-| Le bouton « Publier maintenant » copie le texte et ouvre des pages génériques | Aucune publication ni confirmation de succès n’a lieu | Envoyer le contenu au serveur, traiter chaque réseau, enregistrer les ID et erreurs |
-| La programmation ajoute une entrée locale datée de demain | Rien ne s’exécute à l’heure indiquée | Ajouter une base de données et un ordonnanceur serveur/queue |
-| Le média est seulement affiché dans l’aperçu du navigateur | Le fichier n’est pas envoyé aux réseaux; une URL locale n’est pas accessible par leurs serveurs | Stockage objet privé/public contrôlé, conversions et upload selon les exigences de chaque API |
-| Tout le code est dans le navigateur et s’ouvre par `file://` | Pas de domaine HTTPS, callback OAuth, secrets ou traitement serveur | Héberger l’application sur HTTPS et ajouter une API backend |
-
+| Le mode local prépare et ouvre les réseaux | Il ne publie pas et ne confirme aucun succès; le Worker API dispose des adaptateurs automatisés documentés ci-dessus | Configurer le backend et les accès réels ou utiliser le mode manuel |
+| Les rappels locaux sont enregistrés dans le navigateur | Ils ne s’exécutent pas si l’appareil est fermé; le Worker API offre une programmation serveur persistante | Utiliser l’API déployée et vérifier le Cron avant la programmation réelle |
+| Le média local est affiché dans l’aperçu | Les réseaux ne peuvent pas lire un fichier local; le Worker API téléverse les médias dans R2 pour les parcours pris en charge | Déployer R2 et valider formats, URLs et limites réelles par réseau |
+| Un déploiement statique est disponible | Il n’inclut pas l’API, ses bindings D1/R2 ni ses secrets OAuth | Déployer séparément le Worker API sur des domaines HTTPS configurés |
 ## Capacités par profil fourni
-
 Les URL de profils ne permettent pas de déduire le type interne du compte, les rôles d’administrateur, les limites publicitaires ou le consentement déjà accordé. Le tableau ci-dessous indique la voie documentée et les contrôles à faire lors de la connexion.
-
 | Réseau et profil | Publication officielle | Préconditions / vérifications | Priorité proposée |
 |---|---|---|---|
 | **Instagram** — `@klirlineofficial` | Oui. API Instagram avec connexion Instagram ou connexion Facebook; publication de médias prise en charge. | Le compte doit être **Professionnel** (Business ou Creator). Selon le flux, utiliser le login Instagram Business et la permission de publication Instagram (`instagram_business_content_publish`), ou relier un compte professionnel à une Page Facebook et obtenir les permissions Page/Instagram requises. Vérifier le type de compte et le jeton au retour OAuth. | P1 |
@@ -35,22 +64,16 @@ Les URL de profils ne permettent pas de déduire le type interne du compte, les 
 | **X** — `@klirlineOffice` | Oui via `POST /2/tweets`, avec OAuth utilisateur et permission d’écriture. | Créer un projet/app X Developer, enregistrer le callback OAuth (PKCE est adapté au parcours web avec backend), demander seulement les scopes nécessaires, dont écriture des posts. Vérifier le plan et les coûts d’accès du compte développeur avant de bâtir : tarifs et quotas sont pilotés par X et peuvent évoluer. | P2 — vérifier budget/quota |
 | **Threads** — `@klirlineofficial` | Oui. L’API Threads permet les posts texte, image, vidéo et carrousel via création puis publication, selon le format. | Créer une app Meta avec le cas d’usage Threads, activer OAuth/redirect URI, obtenir la permission `threads_content_publish` et l’autorisation de l’utilisateur. Tester les formats et le cycle d’expiration/renouvellement du jeton. | P1 |
 | **Pinterest** — `@klirlineofficial` | Oui. API v5 permet de créer des Pins/boards avec les scopes d’écriture adaptés. | Compte développeur/app Pinterest approuvé et accès API; OAuth code grant avec redirect URI exacte. Pour publier un Pin, demander `pins:write`; pour choisir une destination/board, lire les boards avec `boards:read`. Le profil public seul ne fournit ni le jeton ni les IDs de board. | P2 |
-| **Bluesky** — `klirlineofficial.bsky.social` | Oui. AT Protocol permet de créer un record `app.bsky.feed.post`; les médias nécessitent l’envoi de blobs et leur intégration dans le record. | Préférer OAuth AT Protocol aux mots de passe. L’authentification et l’écriture se font sur le PDS de l’utilisateur. Prévoir la gestion des handles/DID, sessions, expiration et consentement; si une méthode de transition par mot de passe d’application est évaluée, la traiter comme secret et demander une validation explicite de sécurité avant de l’adopter. | P2 — bon candidat pour prototype technique |
-| **TikTok** — `@klirlineofficial` | Oui via Content Posting API, pour vidéo et désormais photo. | App TikTok Developer, produit Content Posting, OAuth, scope `video.publish`, approbation de la portée et consentement du créateur. Les comptes et réglages de confidentialité disponibles doivent être affichés à l’utilisateur. Le média servi par URL exige un domaine/URL préalablement vérifié; sinon utiliser l’upload fichier. **Sans audit de l’app, les posts API restent privés** : l’audit est donc un préalable au lancement public. | P2/P3 — app review/audit obligatoire pour visibilité publique |
+| **Bluesky** — `klirlineofficial.bsky.social` | Implémenté dans le Worker : texte et image JPEG/PNG de 2 Mo maximum, avec texte alternatif. | Consentement OAuth AT Protocol du compte, métadonnées client HTTPS publiées, puis validation en production et gestion du PDS réel. | Codé; essai réel restant |
+| **TikTok** — `@klirlineofficial` | Content Posting API propose Direct Post vidéo/photo et l’envoi de brouillons, mais ne convient pas au périmètre d’un outil réservé aux comptes et à l’équipe de Klirline. | Les règles officielles excluent les outils limités à une équipe privée/interne, notamment ceux qui téléversent vers des comptes gérés par cette équipe. Garder le profil manuel, la préparation et la confirmation dans l’application TikTok; ne pas développer l’adaptateur dans le périmètre interne. | Manuel — contrainte fournisseur |
 | **Twitch** — `twitch.tv/klirlineofficial` | Pas d’équivalent à un fil de posts sociaux génériques dans l’API consultée. Twitch API couvre plutôt l’identité, les streams, le chat, les annonces, les clips et les vidéos. | Décider ce que « publier sur Twitch » signifie : créer un clip d’un live (scope `clips:edit` et contraintes de stream/VOD), envoyer une annonce dans le chat (pas une publication de promotion sur le profil), ou gérer la chaîne/stream. Il faut OAuth utilisateur pour les actions de chaîne, enregistrer l’app/redirect, valider les jetons. | P3 — fonctionnalité spécifique Twitch, pas un cross-post générique |
-
-**Résultat réaliste :** huit destinations peuvent être étudiées pour une forme de publication sociale, sous réserve des types de compte et examens d’app. Twitch est différent : il ne faut pas le présenter comme un neuvième canal de publication universel. Le Facebook `/people/` est le principal point bloquant à clarifier.
-
+**Résultat réaliste pour Klirline :** sept réseaux ont un adaptateur automatique codé dans le pilote; TikTok reste manuel en raison des règles d’usage interne, et Twitch n’est pas un canal de publication promotionnelle générique. Les neuf profils peuvent être conservés comme liens pour le mode manuel. Le lien Facebook fourni ne prouve pas que le compte est une Page professionnelle : l’administrateur doit confirmer la Page et ses accès avant d’autoriser la publication automatique.
 ## Ce que signifie « sans API » dans le parcours utilisateur
-
 Si l’objectif est que Klirline n’ait pas à créer de jetons ou à copier des clés, c’est possible : l’application peut gérer l’inscription développeur et l’OAuth en coulisses, puis l’utilisateur clique **Connecter**, se connecte directement chez Meta/X/LinkedIn/etc. et accorde des permissions précises.
-
 Si « sans API » signifie qu’aucun appel API ni mécanisme officiel n’est utilisé, alors une publication automatique multi-réseaux n’est pas possible. Un lien de profil n’est pas une autorisation de publication. L’alternative sans API est un assistant manuel : copier le texte, ouvrir chaque site, ajouter le média et cliquer Publier sur chaque plateforme.
-
-## Architecture minimale pour la version réelle
-
+## Architecture initiale et état correspondant dans le pilote interne
 1. **Déployer une web app HTTPS** avec domaine stable, page confidentialité, conditions, suppression des données et URLs de callback OAuth.
-2. **Ajouter comptes utilisateurs et permissions** pour séparer Klirline des futurs clients, même si le premier usage est mono-entreprise.
+2. **Ajouter comptes utilisateurs et rôles** pour l’équipe Klirline : administrateur, rédacteur, lecteur et invitations contrôlées.
 3. **Créer une intégration par fournisseur** avec bouton OAuth, `state` anti-CSRF, scopes minimaux et retour qui vérifie le compte/organisation obtenu.
 4. **Backend de connexion** : échanger le code OAuth côté serveur; ne jamais exposer les secrets client ni stocker les access/refresh tokens dans `localStorage` ou le navigateur. Chiffrer les jetons au repos, limiter l’accès, renouveler/révoquer et auditer les connexions.
 5. **Service de publication** : modèle commun du post, adaptateurs distincts par réseau, règles de longueur/média, prévalidation, tentatives indépendantes par destination, retries prudents et statut par réseau (`en attente`, `publié`, `échec`, `action requise`).
@@ -58,21 +81,17 @@ Si « sans API » signifie qu’aucun appel API ni mécanisme officiel n’est u
 7. **Programmation réelle** : persister la date en UTC, traiter avec une queue serveur, gérer les fuseaux, jetons expirés, modifications, annulations et idempotence pour ne pas poster deux fois.
 8. **App review et conformité** : descriptions d’usage, screencast/compte de test si demandé, politique de confidentialité, instructions de suppression et revue fournisseur. Les accès/permissions précis varient avec le mode développement/production et la catégorie d’app.
 9. **Interface** : connecter/déconnecter chaque compte, montrer le nom obtenu par OAuth, choisir les cibles (Page/organisation/board), indiquer les capacités médias par réseau, proposer adaptation de texte et confirmer le résultat après chaque envoi.
-
-## Informations Klirline à confirmer avant de coder les connexions
-
+## Prérequis Klirline encore à confirmer avant le lancement
 - Instagram : compte Professionnel ou personnel? Business ou Creator? Une Page Facebook est-elle déjà liée si le flux Meta choisi l’exige?
 - Facebook : la destination est-elle bien un profil personnel ou existe-t-il une Page d’entreprise Klirline? Qui a le contrôle complet de cette Page?
 - LinkedIn : qui est administrateur de la page entreprise et peut approuver l’accès de l’application?
 - Pour les neuf comptes : qui peut se connecter et donner le consentement OAuth? Aucun mot de passe ne doit être partagé ici.
-- Public attendu : uniquement les comptes Klirline internes (mode de test) ou d’autres entreprises clientes (app publique, examens élargis)?
-- Contenu visé : texte seul, images, vidéos, carrousels, stories/reels? Les formats ne sont pas identiques partout.
-- Programmation : publication immédiate seulement ou date/heure, fuseau horaire et calendrier?
-- Twitch : voulez-vous publier des clips, envoyer des annonces de chat ou simplement afficher le lien de la chaîne?
+- Usage confirmé : équipe Klirline seulement, sans inscription publique, paiement ni vente.
+- Contenu disponible : le pilote gère le texte et certaines images; vidéo, carrousels, stories et Reels doivent passer par les flux manuels tant que l’interface ne propose pas un adaptateur validé.
+- La programmation serveur et les fuseaux IANA sont codés; il faut valider l’ordonnanceur Cron et les heures sur l’environnement Cloudflare réel.
+- Twitch : affichage du profil et préparation manuelle seulement; définir une tâche distincte si l’équipe veut créer des clips ou des annonces de chat.
 - X : confirmer qu’un budget/API tierce est accepté après consultation des conditions actuellement offertes dans Developer Console.
-
 ## Sources officielles consultées
-
 - Instagram API de Meta (workspace documentaire officiel) : https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api
 - Instagram API avec connexion Instagram, permissions et publication : https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api?entity=request-23987686-894be833-d0b6-4877-859e-c61ae6474d64
 - Threads API officiel Meta (OAuth, permissions, publication) : https://www.postman.com/meta/threads/documentation/dht3nzz/threads-api
@@ -86,7 +105,7 @@ Si « sans API » signifie qu’aucun appel API ni mécanisme officiel n’est u
 - Bluesky account management and OAuth : https://docs.bsky.app/blog/account-management
 - TikTok Content Posting API get started : https://developers.tiktok.com/docs/en/content-posting-api-get-started
 - TikTok Direct Post reference/audit limitations : https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post
+- TikTok Content Sharing Guidelines (les API de publication ne doivent pas servir uniquement à l’équipe privée du développeur ni aux comptes gérés par cette équipe) : https://developers.tiktok.com/docs/en/content-sharing-guidelines
 - Twitch API reference (actions réellement proposées) : https://dev.twitch.tv/docs/api/reference
 - Twitch authentication and OAuth : https://dev.twitch.tv/docs/authentication
 - Twitch create clips : https://dev.twitch.tv/docs/api/clips/
-

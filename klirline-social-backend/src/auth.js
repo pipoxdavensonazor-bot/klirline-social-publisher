@@ -1,4 +1,4 @@
-// Utilisateurs Klirline + roles, separes des futurs clients.
+// Utilisateurs et rôles de l’équipe Klirline.
 // JWT court (12 h) dans Authorization: Bearer. Mot de passe : scrypt (stdlib).
 import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
 import jwt from "jsonwebtoken";
@@ -40,7 +40,11 @@ export function authMiddleware(env, db, ...roles) {
   return (req, res, next) => {
     try {
       const h = req.headers.authorization || "";
-      const token = h.startsWith("Bearer ") ? h.slice(7) : null;
+      const cookies = Object.fromEntries(String(req.headers.cookie || "").split(";").map((part) => {
+        const i = part.indexOf("=");
+        return i < 0 ? ["", ""] : [part.slice(0, i).trim(), decodeURIComponent(part.slice(i + 1).trim())];
+      }).filter(([name]) => name));
+      const token = h.startsWith("Bearer ") ? h.slice(7) : cookies.klirline_session;
       if (!token) return res.status(401).json({ error: "auth-required" });
       if (!env.JWT_SECRET || env.JWT_SECRET.length < 32) return res.status(503).json({ error: "auth-not-configured" });
       const payload = jwt.verify(token, env.JWT_SECRET);

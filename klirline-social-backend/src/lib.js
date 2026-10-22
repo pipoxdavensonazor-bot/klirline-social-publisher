@@ -12,8 +12,16 @@ export function loadEnv() {
   if (!/^[0-9a-fA-F]{64}$/.test(env.TOKENS_ENCRYPTION_KEY_HEX || "")) {
     throw new Error("Configurez TOKENS_ENCRYPTION_KEY_HEX avec exactement 64 caracteres hexadecimaux avant de demarrer le serveur.");
   }
-  if (env.NODE_ENV === "production" && (!/^https:\/\//i.test(env.PUBLIC_BASE_URL || "") || !env.FRONTEND_ORIGIN)) {
-    throw new Error("En production, PUBLIC_BASE_URL et FRONTEND_ORIGIN HTTPS sont obligatoires.");
+  if (env.NODE_ENV === "production") {
+    let publicBaseValid = false;
+    try { const base = new URL(env.PUBLIC_BASE_URL); publicBaseValid = base.protocol === "https:" && base.origin === env.PUBLIC_BASE_URL.replace(/\/$/, ""); } catch {}
+    const origins = String(env.FRONTEND_ORIGIN || "").split(",").map((origin) => origin.trim()).filter(Boolean);
+    const originsValid = origins.length > 0 && origins.every((origin) => {
+      try { const parsed = new URL(origin); return parsed.protocol === "https:" && parsed.origin === origin; } catch { return false; }
+    });
+    if (!publicBaseValid || !originsValid || !env.BOOTSTRAP_ADMIN_KEY || env.BOOTSTRAP_ADMIN_KEY.length < 32 || !env.COMPANY_LEGAL_NAME || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(env.PRIVACY_CONTACT_EMAIL || "")) {
+      throw new Error("En production, configurez les URLs HTTPS exactes (sans chemin), BOOTSTRAP_ADMIN_KEY, COMPANY_LEGAL_NAME et PRIVACY_CONTACT_EMAIL.");
+    }
   }
   return env;
 }

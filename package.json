@@ -1,0 +1,12 @@
+{
+  "name": "klirline-social-publisher-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-site.mjs",
+    "deploy": "npx wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,736 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync, readdirSync } from "node:fs";
+import worker from "../src/index.js";
+
+function fixture(overrides = {}) {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec("PRAGMA foreign_keys=ON");
+  for (const migration of readdirSync(new URL("../migrations/", import.meta.url)).filter((name) => /^\d+_.+\.sql$/.test(name)).sort()) {
+    sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+  class Statement {
+    constructor(sql) { this.sql = sql; this.params = []; }
+    bind(...params) { this.params = params; return this; }
+    first() { return sqlite.prepare(this.sql).get(...this.params) || null; }
+    all() { return { results: sqlite.prepare(this.sql).all(...this.params) }; }
+    run() { const result = sqlite.prepare(this.sql).run(...this.params); return { meta: { changes: Number(result.changes) } }; }
+  }
+  const DB = {
+    prepare(sql) { return new Statement(sql); },
+    async batch(statements) {
+      sqlite.exec("BEGIN");
+      try { const result = statements.map((statement) => statement.run()); sqlite.exec("COMMIT"); return result; }
+      catch (error) { sqlite.exec("ROLLBACK"); throw error; }
+    }
+  };
+  const objects = new Map();
+  const MEDIA = {
+    async put(key, value) { objects.set(key, value); },
+    async get(key) { const body = objects.get(key); return body ? { body } : null; },
+    async head(key) { return objects.has(key) ? { key } : null; },
+    async delete(key) { objects.delete(key); }
+  };
+  const env = {
+    DB, MEDIA, INTERNAL_MODE: "true", SESSION_SECRET: "s".repeat(48), TOKENS_ENCRYPTION_KEY_HEX: "a".repeat(64),
+    BOOTSTRAP_ADMIN_KEY: "bootstrap-secret".repeat(3), FRONTEND_ORIGIN: "https://app.test", PUBLIC_BASE_URL: "https://api.test",
+    LINKEDIN_CLIENT_ID: "client", LINKEDIN_CLIENT_SECRET: "secret", LINKEDIN_REDIRECT_URI: "https://api.test/oauth/linkedin/callback",
+    LINKEDIN_ORGANIZATION_URN: "urn:li:organization:98765", LINKEDIN_VERSION: "202610", ...overrides
+  };
+  async function request(path, method = "GET", body = null, headers = {}) {
+    const requestHeaders = new Headers(headers);
+    requestHeaders.set("Origin", "https://app.test");
+    if (method !== "GET") requestHeaders.set("X-Klirline-Request", "1");
+    if (body && !(body instanceof FormData)) requestHeaders.set("Content-Type", "application/json");
+    const req = new Request(`https://api.test${path}`, {
+      method, headers: requestHeaders,
+      body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : undefined
+    });
+    return worker.fetch(req, env, { waitUntil() {} });
+  }
+  return { DB, MEDIA, env, objects, request, sqlite };
+}
+
+function base64url(bytes) { return btoa(String.fromCharCode(...bytes)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_"); }
+async function testPasswordHash(password, saltBytes) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  return base64url(new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt: saltBytes, iterations: 310000, hash: "SHA-256" }, key, 256)));
+}
+
+async function bootstrap(ctx, email = "owner@klirline.ca") {
+  const response = await ctx.request("/api/auth/register", "POST", { email, password: "a-secure-password-123" }, { "X-Klirline-Bootstrap": ctx.env.BOOTSTRAP_ADMIN_KEY });
+  assert.equal(response.status, 201);
+  return response.headers.get("set-cookie").split(";")[0];
+}
+
+async function approveCampaignDraft(ctx, authorCookie, {text,targets,mediaId=null}, reviewerCookie=authorCookie) {
+  const created=await ctx.request("/api/drafts","POST",{title:"Campagne de test",text,targets,mediaId,countryCode:"CA",languageTag:"fr-CA",timezone:"America/Toronto"},{Cookie:authorCookie});
+  assert.equal(created.status,201,await created.clone().text());
+  const draft=await created.json();
+  assert.equal((await ctx.request(`/api/drafts/${draft.id}`,"POST",{action:"submit-review"},{Cookie:authorCookie})).status,200);
+  assert.equal((await ctx.request(`/api/drafts/${draft.id}/review`,"POST",{decision:"approved"},{Cookie:reviewerCookie})).status,200);
+  return draft.id;
+}
+
+test("internal auth, media, scheduling, and publish idempotency", async () => {
+  const ctx = fixture();
+  assert.equal((await (await ctx.request("/api/health")).json()).ok, true);
+  const cookie = await bootstrap(ctx);
+  assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: cookie })).status, 200);
+
+  const invalidSchedule = await ctx.request("/api/scheduled", "POST", {
+    text: "Klirline", targets: ["instagram"], mediaId: "missing", runAtUTC: new Date(Date.now() + 120000).toISOString()
+  }, { Cookie: cookie });
+  assert.equal(invalidSchedule.status, 404);
+
+  const form = new FormData();
+  form.append("file", new Blob([Uint8Array.from([255, 216, 255, 0])], { type: "image/jpeg" }), "campaign.jpg");
+  form.append("altText", "Capture de la page Klirline");
+  const upload = await ctx.request("/api/media", "POST", form, { Cookie: cookie });
+  const media = await upload.json();
+  assert.equal(upload.status, 201);
+  assert.equal(ctx.objects.size, 1);
+  assert.equal(ctx.sqlite.prepare("SELECT alt_text FROM media WHERE id=?").get(media.id).alt_text, "Capture de la page Klirline");
+
+  ctx.sqlite.prepare("UPDATE media SET expires_at=? WHERE id=?").run(new Date(Date.now() + 60 * 60 * 1000).toISOString(), media.id);
+  const expiringMediaSchedule = await ctx.request("/api/scheduled", "POST", {
+    text: "Klirline", targets: ["instagram"], mediaId: media.id, runAtUTC: new Date(Date.now() + 58 * 60 * 1000).toISOString()
+  }, { Cookie: cookie });
+  assert.equal(expiringMediaSchedule.status, 400);
+  assert.equal((await expiringMediaSchedule.json()).error, "scheduled-media-expires-too-soon");
+  ctx.sqlite.prepare("UPDATE media SET expires_at=? WHERE id=?").run(new Date(Date.now() + 30 * 86400000).toISOString(), media.id);
+
+  const schedule = { text: "Klirline", targets: ["instagram"], mediaId: media.id, runAtUTC: new Date(Date.now() + 120000).toISOString(), timezone: "America/Toronto" };
+  schedule.draftId=await approveCampaignDraft(ctx,cookie,schedule);
+  const queued = await ctx.request("/api/scheduled", "POST", schedule, { Cookie: cookie, "Idempotency-Key": "schedule-once" });
+  const queuedJob = (await queued.json()).job;
+  assert.equal(queuedJob.status, "queued");
+  assert.equal(queuedJob.timezone,"America/Toronto");
+  const invalidZone = await ctx.request("/api/scheduled","POST",{...schedule,timezone:"Mars/Olympus_Mons"},{Cookie:cookie,"Idempotency-Key":"schedule-invalid-zone"});
+  assert.equal(invalidZone.status,400);
+  assert.equal((await invalidZone.json()).error,"invalid-time-zone");
+  const replayedSchedule = await ctx.request("/api/scheduled", "POST", schedule, { Cookie: cookie, "Idempotency-Key": "schedule-once" });
+  assert.equal((await replayedSchedule.json()).deduped, true);
+  const scheduleConflict = await ctx.request("/api/scheduled", "POST", { ...schedule, text: "Different content" }, { Cookie: cookie, "Idempotency-Key": "schedule-once" });
+  assert.equal(scheduleConflict.status, 409);
+
+  const dueAt = new Date(Date.now() - 1000).toISOString();
+  ctx.sqlite.prepare("UPDATE scheduled_posts SET run_at=? WHERE id=?").run(dueAt, queuedJob.id);
+  ctx.sqlite.prepare("UPDATE scheduled_results SET next_run_at=? WHERE job_id=?").run(dueAt, queuedJob.id);
+  const pending = [];
+  await worker.scheduled({}, ctx.env, { waitUntil(promise) { pending.push(promise); } });
+  await Promise.all(pending);
+  const processedJobs = await (await ctx.request("/api/scheduled", "GET", null, { Cookie: cookie })).json();
+  assert.equal(processedJobs.find((job) => job.id === queuedJob.id).status, "action-required");
+  assert.equal(processedJobs.find((job) => job.id === queuedJob.id).timezone,"America/Toronto");
+  const cronAudit = await (await ctx.request("/api/audit", "GET", null, { Cookie: cookie })).json();
+  assert.ok(cronAudit.some((event) => event.type === "publication.schedule.processed" && event.targetId === queuedJob.id));
+
+  const cancelPayload={text:"Annulation",targets:["linkedin"],runAtUTC:new Date(Date.now()+120000).toISOString()};
+  cancelPayload.draftId=await approveCampaignDraft(ctx,cookie,cancelPayload);
+  const cancelJob = await ctx.request("/api/scheduled", "POST", cancelPayload, { Cookie: cookie, "Idempotency-Key": "cancel-once" });
+  const cancelId = (await cancelJob.json()).job.id;
+  const canceled = await ctx.request(`/api/scheduled/${encodeURIComponent(cancelId)}`, "DELETE", null, { Cookie: cookie });
+  assert.equal((await canceled.json()).status, "canceled");
+
+  const publishPayload={text:"Klirline",targets:["facebook"]};
+  publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+  const publish = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie, "Idempotency-Key": "publish-once" });
+  const result = await publish.json();
+  assert.equal(result.results[0].status, "action-required");
+  const replayedPublish = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie, "Idempotency-Key": "publish-once" });
+  assert.equal((await replayedPublish.json()).deduped, true);
+  const publishConflict = await ctx.request("/api/publish", "POST", { ...publishPayload, text:"Different content" }, { Cookie: cookie, "Idempotency-Key": "publish-once" });
+  assert.equal(publishConflict.status, 409);
+  const unknownTarget = await ctx.request("/api/publish", "POST", { text: "Klirline", targets: ["facebook", "unknown-network"] }, { Cookie: cookie });
+  assert.equal(unknownTarget.status, 400);
+
+  const deletion = await ctx.request("/api/account", "DELETE", { password: "a-secure-password-123" }, { Cookie: cookie });
+  assert.equal(deletion.status, 409);
+  assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: cookie })).status, 200);
+});
+
+test("X API publication and scheduling enforce weighted Unicode text length", async () => {
+  const ctx = fixture();
+  const cookie = await bootstrap(ctx);
+  const tooLong = await ctx.request("/api/publish", "POST", { text: "✨".repeat(141), targets: ["x"] }, { Cookie: cookie });
+  assert.equal(tooLong.status, 400);
+  assert.equal((await tooLong.json()).error, "too-long:x");
+
+  const control = await ctx.request("/api/publish", "POST", { text: "bonjour\uFFFFX", targets: ["x"] }, { Cookie: cookie });
+  assert.equal(control.status, 400);
+  assert.equal((await control.json()).error, "invalid-x-text");
+
+  const urlText = `${"https://example.com/a/very/long/path".padEnd(240, "x")} hello`;
+  const publishPayload={text:urlText,targets:["x"]};
+  publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+  const published = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie, "Idempotency-Key": "x-weighted-url" });
+  assert.equal(published.status, 200);
+
+  const schedulePayload={text:"✨".repeat(140),targets:["x"],runAtUTC:new Date(Date.now()+120000).toISOString(),timezone:"Asia/Tokyo"};
+  schedulePayload.draftId=await approveCampaignDraft(ctx,cookie,schedulePayload);
+  const schedule = await ctx.request("/api/scheduled", "POST", schedulePayload, { Cookie: cookie, "Idempotency-Key": "x-weighted-schedule" });
+  assert.equal(schedule.status, 200);
+  const job = (await schedule.json()).job;
+  await ctx.request(`/api/scheduled/${job.id}`, "DELETE", null, { Cookie: cookie });
+});
+
+test("write requests reject missing origin and CSRF marker", async () => {
+  const ctx = fixture();
+  const response = await worker.fetch(new Request("https://api.test/api/auth/register", {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Klirline-Bootstrap": "bootstrap-secret" },
+    body: JSON.stringify({ email: "owner@klirline.ca", password: "a-secure-password-123" })
+  }), ctx.env, { waitUntil() {} });
+  assert.equal(response.status, 403);
+});
+
+test("password changes invalidate previous sessions and keep the current session active", async () => {
+  const ctx = fixture();
+  const oldCookie = await bootstrap(ctx);
+  const deniedChange = await ctx.request("/api/auth/password", "POST", { currentPassword: "wrong-password", newPassword: "another-secure-password" }, { Cookie: oldCookie });
+  assert.equal(deniedChange.status, 401);
+  const changed = await ctx.request("/api/auth/password", "POST", { currentPassword: "a-secure-password-123", newPassword: "a-different-password-456" }, { Cookie: oldCookie });
+  assert.equal(changed.status, 200);
+  const newCookie = changed.headers.get("set-cookie").split(";")[0];
+  assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: newCookie })).status, 200);
+  assert.equal((await ctx.request("/api/me", "GET", null, { Cookie: oldCookie })).status, 401);
+  const oldPasswordLogin = await ctx.request("/api/auth/login", "POST", { email: "owner@klirline.ca", password: "a-secure-password-123" });
+  assert.equal(oldPasswordLogin.status, 401);
+  assert.equal((await ctx.request("/api/auth/login", "POST", { email: "owner@klirline.ca", password: "a-different-password-456" })).status, 200);
+});
+
+test("JSON request limit is enforced when Content-Length is absent", async () => {
+  const ctx = fixture();
+  const body = JSON.stringify({ email: "owner@klirline.ca", password: "x".repeat(2 * 1024 * 1024) });
+  const request = new Request("https://api.test/api/auth/register", {
+    method: "POST",
+    headers: { Origin: "https://app.test", "Content-Type": "application/json", "X-Klirline-Request": "1" },
+    body
+  });
+  assert.equal(request.headers.get("Content-Length"), null);
+  const response = await worker.fetch(request, ctx.env, { waitUntil() {} });
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error, "request-too-large");
+});
+
+test("internal workspace publishes without billing and keeps public signup closed", async () => {
+  const ctx = fixture({ INTERNAL_MODE: "true", ALLOW_PUBLIC_SIGNUP: "true" });
+  await bootstrap(ctx);
+  ctx.sqlite.prepare("UPDATE organizations SET billing_status='canceled' WHERE id='klirline'").run();
+  const cookie = (await ctx.request("/api/auth/login", "POST", { email: "owner@klirline.ca", password: "a-secure-password-123" })).headers.get("set-cookie").split(";")[0];
+  const config = await (await ctx.request("/api/public-config")).json();
+  assert.equal(config.internalMode, true);
+  assert.equal(config.publicSignupEnabled, false);
+  const access = await (await ctx.request("/api/usage", "GET", null, { Cookie: cookie })).json();
+  assert.equal(access.status, "internal");
+  assert.equal(access.usage.publicationLimit, 5000);
+  const publishPayload={text:"Klirline interne",targets:["facebook"]};
+  publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+  const publish = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie });
+  assert.equal(publish.status, 200);
+  assert.equal((await publish.json()).results[0].status, "action-required");
+  const signup = await ctx.request("/api/auth/signup", "POST", { email: "external@example.ca", password: "a-secure-password-123", organizationName: "External" });
+  assert.equal(signup.status, 404);
+});
+
+test("shared campaign drafts enforce workspace visibility and approval roles", async () => {
+  const ctx=fixture(); const adminCookie=await bootstrap(ctx);
+  const invite=await ctx.request("/api/team/invitations","POST",{email:"editor-drafts@klirline.ca",role:"redacteur"},{Cookie:adminCookie});
+  const token=new URL((await invite.json()).invitationUrl).searchParams.get("invite");
+  const accepted=await ctx.request("/api/team/accept","POST",{token,password:"draft-editor-password-123"});
+  const editorCookie=accepted.headers.get("set-cookie").split(";")[0];
+  const imageForm=new FormData(); imageForm.append("file",new Blob([Uint8Array.from([255,216,255,0])],{type:"image/jpeg"}),"canada.jpg");
+  const mediaUpload=await ctx.request("/api/media","POST",imageForm,{Cookie:adminCookie}); const mediaId=(await mediaUpload.json()).id;
+  const draftResponse=await ctx.request("/api/drafts","POST",{title:"Campagne Canada",text:"Version française de campagne",targets:["facebook"],countryCode:"ca",languageTag:"fr-ca",timezone:"America/Toronto",mediaId},{Cookie:editorCookie});
+  assert.equal(draftResponse.status,201);
+  const draft=await draftResponse.json();
+  assert.equal(draft.countryCode,"CA"); assert.equal(draft.languageTag,"fr-CA"); assert.equal(draft.reviewStatus,"draft"); assert.equal(draft.mediaId,mediaId);
+  assert.equal((await (await ctx.request("/api/drafts","GET",null,{Cookie:adminCookie})).json())[0].id,draft.id);
+  assert.equal((await ctx.request(`/api/drafts/${draft.id}/review`,"POST",{decision:"approved"},{Cookie:editorCookie})).status,403);
+  assert.equal((await ctx.request(`/api/drafts/${draft.id}`,"POST",{action:"submit-review"},{Cookie:editorCookie})).status,200);
+  assert.equal((await ctx.request(`/api/drafts/${draft.id}/review`,"POST",{decision:"rejected",note:"Préciser l’offre"},{Cookie:adminCookie})).status,200);
+  const corrected=await ctx.request(`/api/drafts/${draft.id}`,"PUT",{title:"Campagne Canada corrigée",text:"Version corrigée",targets:["facebook"],countryCode:"CA",languageTag:"fr-CA",timezone:"America/Toronto"},{Cookie:editorCookie});
+  assert.equal((await corrected.json()).reviewStatus,"draft");
+  assert.equal((await ctx.request("/api/drafts","POST",{text:"Mauvais pays",countryCode:"CAN"},{Cookie:editorCookie})).status,400);
+  assert.equal((await ctx.request("/api/drafts","POST",{text:"Pays inconnu",countryCode:"ZZ"},{Cookie:editorCookie})).status,400);
+  assert.equal((await ctx.request("/api/drafts","POST",{text:"Région réservée",countryCode:"EU"},{Cookie:editorCookie})).status,400);
+  assert.equal((await ctx.request("/api/drafts","POST",{text:"Code hors ISO",countryCode:"UK"},{Cookie:editorCookie})).status,400);
+  assert.equal((await ctx.request("/api/drafts","GET")).status,401);
+  const audit=await (await ctx.request("/api/audit","GET",null,{Cookie:adminCookie})).json();
+  assert.ok(audit.some(event=>event.type==="campaign.draft.rejected"));
+});
+
+test("approved campaign drafts gate automatic publishing and scheduling", async () => {
+  const ctx=fixture({REQUIRE_APPROVED_DRAFTS:"true"}); const cookie=await bootstrap(ctx);
+  const create=async(text)=>{
+    const response=await ctx.request("/api/drafts","POST",{title:"Campagne approuvée",text,targets:["facebook"],countryCode:"CA",languageTag:"fr-CA",timezone:"America/Toronto"},{Cookie:cookie});
+    assert.equal(response.status,201); const draft=await response.json();
+    assert.equal((await ctx.request(`/api/drafts/${draft.id}`,"POST",{action:"submit-review"},{Cookie:cookie})).status,200);
+    const approved=await ctx.request(`/api/drafts/${draft.id}/review`,"POST",{decision:"approved"},{Cookie:cookie});
+    assert.equal(approved.status,200); return draft.id;
+  };
+  const publishDraft=await create("Texte approuvé pour publication");
+  const missing=await ctx.request("/api/publish","POST",{text:"Texte approuvé pour publication",targets:["facebook"]},{Cookie:cookie,"Idempotency-Key":"approved-missing"});
+  assert.equal(missing.status,409); assert.equal((await missing.json()).error,"approved-campaign-draft-required");
+  const mismatch=await ctx.request("/api/publish","POST",{text:"Texte modifié",targets:["facebook"],draftId:publishDraft},{Cookie:cookie,"Idempotency-Key":"approved-mismatch"});
+  assert.equal(mismatch.status,409); assert.equal((await mismatch.json()).error,"approved-campaign-content-mismatch");
+  const published=await ctx.request("/api/publish","POST",{text:"Texte approuvé pour publication",targets:["facebook"],draftId:publishDraft},{Cookie:cookie,"Idempotency-Key":"approved-publish"});
+  assert.equal(published.status,200); assert.equal((await published.json()).results[0].status,"action-required");
+  const replay=await ctx.request("/api/publish","POST",{text:"Texte approuvé pour publication",targets:["facebook"],draftId:publishDraft},{Cookie:cookie,"Idempotency-Key":"approved-publish"});
+  assert.equal((await replay.json()).deduped,true);
+  const reused=await ctx.request("/api/publish","POST",{text:"Texte approuvé pour publication",targets:["facebook"],draftId:publishDraft},{Cookie:cookie,"Idempotency-Key":"approved-publish-again"});
+  assert.equal(reused.status,409); assert.equal((await reused.json()).error,"approved-campaign-draft-not-ready");
+  const scheduleDraft=await create("Texte approuvé pour programmation");
+  const schedulePayload={text:"Texte approuvé pour programmation",targets:["facebook"],draftId:scheduleDraft,runAtUTC:new Date(Date.now()+120000).toISOString(),timezone:"America/Toronto"};
+  const scheduled=await ctx.request("/api/scheduled","POST",schedulePayload,{Cookie:cookie,"Idempotency-Key":"approved-schedule"});
+  assert.equal(scheduled.status,200); const job=(await scheduled.json()).job;
+  const inProgress=await ctx.request(`/api/drafts/${scheduleDraft}`,"PUT",{text:"Modification",targets:["facebook"]},{Cookie:cookie});
+  assert.equal(inProgress.status,409);
+  const canceled=await ctx.request(`/api/scheduled/${job.id}`,"DELETE",null,{Cookie:cookie});
+  assert.equal((await canceled.json()).status,"canceled");
+  const reusedAfterCancel=await ctx.request("/api/scheduled","POST",schedulePayload,{Cookie:cookie,"Idempotency-Key":"approved-schedule-new"});
+  assert.equal(reusedAfterCancel.status,200);
+});
+
+test("internal workspace always requires campaign approval even if its flag is misconfigured", async () => {
+  const ctx=fixture({INTERNAL_MODE:"true",REQUIRE_APPROVED_DRAFTS:"false"});
+  const config=await (await ctx.request("/api/public-config")).json();
+  assert.equal(config.requireApprovedDrafts,true);
+  const cookie=await bootstrap(ctx);
+  const response=await ctx.request("/api/publish","POST",{text:"Promotion Klirline",targets:["facebook"]},{Cookie:cookie,"Idempotency-Key":"internal-approval-required"});
+  assert.equal(response.status,409);
+  assert.equal((await response.json()).error,"approved-campaign-draft-required");
+  const health=await (await ctx.request("/api/health")).json();
+  assert.equal(health.checks.approvalGateConfigured,true);
+});
+
+test("internal team invitations create shared workspace readers and allow access revocation", async () => {
+  const ctx = fixture({ INTERNAL_MODE: "true" });
+  const adminCookie = await bootstrap(ctx);
+  const invite = await ctx.request("/api/team/invitations", "POST", { email: "editor@klirline.ca", role: "redacteur" }, { Cookie: adminCookie });
+  assert.equal(invite.status, 201);
+  const inviteData = await invite.json();
+  const token = new URL(inviteData.invitationUrl).searchParams.get("invite");
+  assert.ok(token);
+  assert.equal((await (await ctx.request("/api/team/invitations","GET",null,{Cookie:adminCookie})).json()).length,1);
+  const accepted = await ctx.request("/api/team/accept", "POST", { token, password: "editor-secure-password-123" });
+  assert.equal(accepted.status, 201);
+  const editorCookie = accepted.headers.get("set-cookie").split(";")[0];
+  assert.equal((await ctx.request("/api/team/accept", "POST", { token, password: "editor-secure-password-123" })).status, 400);
+  const earlyAudit = await (await ctx.request("/api/audit", "GET", null, { Cookie: adminCookie })).json();
+  assert.deepEqual(earlyAudit.map((event) => event.type), ["team.invitation.accepted","team.invitation.created"]);
+  assert.equal(earlyAudit[0].actorEmail,"editor@klirline.ca");
+
+  const adminId = ctx.sqlite.prepare("SELECT id FROM users WHERE email='owner@klirline.ca'").get().id;
+  const editorId = ctx.sqlite.prepare("SELECT id FROM users WHERE email='editor@klirline.ca'").get().id;
+  ctx.sqlite.prepare("INSERT INTO posts(id,user_id,text,results_json,created_at) VALUES('shared-post',?,'Internal campaign','[]',?)").run(adminId,new Date().toISOString());
+  const sharedPosts = await (await ctx.request("/api/posts", "GET", null, { Cookie: editorCookie })).json();
+  assert.equal(sharedPosts.length, 1);
+  assert.equal(sharedPosts[0].authorId, adminId);
+  const imageForm = new FormData();
+  imageForm.append("file",new Blob([Uint8Array.from([255,216,255,0])],{type:"image/jpeg"}),"team.jpg");
+  const uploaded = await ctx.request("/api/media","POST",imageForm,{Cookie:adminCookie});
+  const sharedMedia = await uploaded.json();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const rawKey = Uint8Array.from(ctx.env.TOKENS_ENCRYPTION_KEY_HEX.match(/.{2}/g),(byte)=>parseInt(byte,16));
+  const key = await crypto.subtle.importKey("raw",rawKey,"AES-GCM",false,["encrypt"]);
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,new TextEncoder().encode(JSON.stringify({accessToken:"shared-facebook-token"}))));
+  ctx.sqlite.prepare("INSERT INTO connections(id,user_id,org_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+    .run("shared-facebook-connection",adminId,"klirline","facebook","page-123","Klirline Page",JSON.stringify({id:"page-123",label:"Klirline Page"}),"[]",base64url(sealed),base64url(iv),new Date().toISOString());
+  const sharedConnections = await (await ctx.request("/api/connections","GET",null,{Cookie:editorCookie})).json();
+  assert.equal(sharedConnections[0].account.label,"Klirline Page");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({id:"shared-page-post"});
+  try {
+    const publishPayload={text:"Shared internal campaign",targets:["facebook"],mediaId:sharedMedia.id};
+    publishPayload.draftId=await approveCampaignDraft(ctx,editorCookie,publishPayload,adminCookie);
+    const published = await ctx.request("/api/publish","POST",publishPayload,{Cookie:editorCookie});
+    assert.equal(published.status,200);
+    assert.equal((await published.json()).results[0].status,"published");
+  } finally { globalThis.fetch = originalFetch; }
+  const schedulePayload={text:"Shared scheduled campaign",targets:["facebook"],runAtUTC:new Date(Date.now()+120000).toISOString()};
+  schedulePayload.draftId=await approveCampaignDraft(ctx,adminCookie,schedulePayload);
+  const scheduled = await ctx.request("/api/scheduled","POST",schedulePayload,{Cookie:adminCookie});
+  assert.equal(scheduled.status,200);
+  const scheduleId = (await scheduled.json()).job.id;
+  const sharedSchedule = await (await ctx.request("/api/scheduled","GET",null,{Cookie:editorCookie})).json();
+  assert.ok(sharedSchedule.some(job=>job.id===scheduleId));
+  assert.equal((await ctx.request(`/api/scheduled/${encodeURIComponent(scheduleId)}`,"DELETE",null,{Cookie:editorCookie})).status,200);
+  const members = await (await ctx.request("/api/team", "GET", null, { Cookie: adminCookie })).json();
+  assert.equal(members.length, 2);
+  assert.equal((await ctx.request("/api/team", "GET", null, { Cookie: editorCookie })).status, 403);
+
+  assert.equal((await ctx.request(`/api/team/${encodeURIComponent(editorId)}`, "DELETE", null, { Cookie: adminCookie })).status, 200);
+  assert.equal((await ctx.request("/api/posts", "GET", null, { Cookie: editorCookie })).status, 401);
+  assert.equal(ctx.sqlite.prepare("SELECT COUNT(*) AS count FROM posts WHERE id='shared-post'").get().count, 1);
+  assert.equal((await ctx.request(`/api/team/${encodeURIComponent(editorId)}/activate`,"POST",{}, {Cookie:adminCookie})).status,200);
+  const editorLogin = await ctx.request("/api/auth/login","POST",{email:"editor@klirline.ca",password:"editor-secure-password-123"});
+  assert.equal(editorLogin.status,200);
+  const currentEditorCookie = editorLogin.headers.get("set-cookie").split(";")[0];
+  const finalAudit = await (await ctx.request("/api/audit", "GET", null, { Cookie: adminCookie })).json();
+  for (const type of ["publication.sent","publication.scheduled","publication.schedule-canceled","team.member.disabled","team.member.enabled"]) assert.ok(finalAudit.some((event) => event.type === type),type);
+  assert.equal((await ctx.request("/api/audit", "GET", null, { Cookie: currentEditorCookie })).status,403);
+});
+
+test("health endpoint reports missing production bindings and secrets", async () => {
+  const healthy = fixture();
+  assert.equal((await healthy.request("/api/health")).status, 200);
+  const missingBootstrapKey = fixture({ BOOTSTRAP_ADMIN_KEY: "short" });
+  const bootstrapHealth = await missingBootstrapKey.request("/api/health");
+  assert.equal(bootstrapHealth.status, 503);
+  assert.equal((await bootstrapHealth.json()).checks.adminBootstrapReady, false);
+  const configuredBootstrap = fixture();
+  await bootstrap(configuredBootstrap);
+  configuredBootstrap.env.BOOTSTRAP_ADMIN_KEY = "";
+  const initializedHealth = await configuredBootstrap.request("/api/health");
+  assert.equal(initializedHealth.status, 200);
+  assert.equal((await initializedHealth.json()).checks.adminBootstrapReady, true);
+  const missingMigration = fixture();
+  missingMigration.sqlite.exec("DROP TABLE campaign_drafts");
+  const migrationResponse = await missingMigration.request("/api/health");
+  assert.equal(migrationResponse.status, 503);
+  assert.equal((await migrationResponse.json()).checks.databaseSchema, false);
+  const missingApprovalMigration=fixture();
+  missingApprovalMigration.sqlite.exec("DROP INDEX campaign_drafts_org_publication_state; ALTER TABLE campaign_drafts DROP COLUMN publication_state");
+  const approvalMigrationResponse=await missingApprovalMigration.request("/api/health");
+  assert.equal(approvalMigrationResponse.status,503);
+  assert.equal((await approvalMigrationResponse.json()).checks.databaseSchema,false);
+  const missingR2 = fixture({ MEDIA: null });
+  const response = await missingR2.request("/api/health");
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).checks.mediaStorage, false);
+  const missingKey = fixture({ TOKENS_ENCRYPTION_KEY_HEX: "" });
+  assert.equal((await missingKey.request("/api/health")).status, 503);
+  const publicMode = fixture({ INTERNAL_MODE: "false" });
+  const publicModeHealth = await publicMode.request("/api/health");
+  assert.equal(publicModeHealth.status, 503);
+  assert.equal((await publicModeHealth.json()).checks.internalMode,false);
+});
+
+test("initial administrator bootstrap rejects a short key", async () => {
+  const ctx = fixture({ BOOTSTRAP_ADMIN_KEY: "short" });
+  const response = await ctx.request("/api/auth/register", "POST", {
+    email: "owner@klirline.ca",
+    password: "a-secure-password-123"
+  }, { "X-Klirline-Bootstrap": "short" });
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "bootstrap-key-not-configured");
+  assert.equal(ctx.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get().count, 0);
+});
+
+test("expired schedule leases require review instead of retrying an uncertain public send", async () => {
+  const ctx = fixture();
+  const cookie = await bootstrap(ctx);
+  const schedulePayload={text:"Campagne mondiale Klirline",targets:["linkedin"],runAtUTC:new Date(Date.now()+120000).toISOString()};
+  schedulePayload.draftId=await approveCampaignDraft(ctx,cookie,schedulePayload);
+  const response = await ctx.request("/api/scheduled", "POST", schedulePayload, { Cookie: cookie, "Idempotency-Key": "expired-worker-lease" });
+  const job = (await response.json()).job;
+  ctx.sqlite.prepare("UPDATE scheduled_posts SET status='processing',lease_until=? WHERE id=?").run("2000-01-01T00:00:00.000Z", job.id);
+
+  const pending = [];
+  await worker.scheduled({}, ctx.env, { waitUntil(promise) { pending.push(promise); } });
+  await Promise.all(pending);
+
+  const jobs = await (await ctx.request("/api/scheduled", "GET", null, { Cookie: cookie })).json();
+  const recovered = jobs.find((item) => item.id === job.id);
+  assert.equal(recovered.status, "action-required");
+  assert.deepEqual(recovered.results, [{ provider: "linkedin", connectionId: null, status: "action-required", message: "worker-lease-expired-outcome-unknown" }]);
+  const audit = await (await ctx.request("/api/audit", "GET", null, { Cookie: cookie })).json();
+  assert.ok(audit.some((event) => event.type === "publication.schedule.recovery-required" && event.targetId === job.id));
+});
+
+test("internal account capacity supports regional profiles without subscription limits", async () => {
+  const ctx = fixture({ WORKSPACE_MAX_CONNECTED_ACCOUNTS: "invalid" });
+  const cookie = await bootstrap(ctx);
+  const usage = await (await ctx.request("/api/usage", "GET", null, { Cookie: cookie })).json();
+  assert.equal(usage.usage.connectedAccountLimit, 100);
+  const userId = ctx.sqlite.prepare("SELECT id FROM users WHERE email=?").get("owner@klirline.ca").id;
+  for (let i = 0; i < 10; i++) {
+    ctx.sqlite.prepare("INSERT INTO connections(id,user_id,org_id,provider,account_id,account_label,token_ciphertext,token_iv,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+      .run(`connection-${i}`, userId, "klirline", `existing-${i}`, `account-${i}`, `Account ${i}`, "ciphertext", "iv", new Date().toISOString());
+  }
+  const start = await ctx.request("/oauth/instagram/start", "GET", null, { Cookie: cookie });
+  assert.equal(start.status, 503);
+  assert.equal((await start.json()).error, "missing-credentials");
+});
+
+test("LinkedIn OAuth accepts approved publishing roles and rejects unrelated roles", async () => {
+  const ctx = fixture({ WORKSPACE_MAX_CONNECTED_ACCOUNTS: "1" });
+  const adminCookie = await bootstrap(ctx);
+  const originalFetch = globalThis.fetch;
+  let organizationRole = "ADMINISTRATOR";
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("/oauth/v2/accessToken")) return Response.json({ access_token: "test-access-token", expires_in: 3600 });
+    if (target.includes("/v2/userinfo")) return Response.json({ sub: "member-1", name: "LinkedIn Member" });
+    if (target.includes("/organizationAcls")) return Response.json({ elements: [{ state: "APPROVED", role: organizationRole, organization: ctx.env.LINKEDIN_ORGANIZATION_URN }] });
+    throw new Error(`Unexpected mocked fetch: ${target}`);
+  };
+  try {
+    async function begin(cookie) {
+      const response = await ctx.request("/oauth/linkedin/start", "GET", null, { Cookie: cookie });
+      const stateCookie = response.headers.get("set-cookie").split(";")[0];
+      const location = response.headers.get("location");
+      return { cookie: stateCookie, state: new URL(location).searchParams.get("state"), location };
+    }
+    const oauth = await begin(adminCookie);
+    assert.match(new URL(oauth.location).searchParams.get("scope"), /r_organization_admin/);
+    const accepted = await ctx.request(`/oauth/linkedin/callback?code=fake&state=${encodeURIComponent(oauth.state)}`, "GET", null, { Cookie: `${adminCookie}; ${oauth.cookie}` });
+    assert.equal(accepted.status, 302);
+    const connections = await (await ctx.request("/api/connections", "GET", null, { Cookie: adminCookie })).json();
+    assert.ok(connections.some((item) => item.provider === "linkedin" && item.account.label === "LinkedIn organization"));
+    organizationRole="CONTENT_ADMIN";
+    const contentAdminOAuth=await begin(adminCookie);
+    const contentAdminAccepted=await ctx.request(`/oauth/linkedin/callback?code=fake&state=${encodeURIComponent(contentAdminOAuth.state)}`,"GET",null,{Cookie:`${adminCookie}; ${contentAdminOAuth.cookie}`});
+    assert.equal(contentAdminAccepted.status,302);
+    organizationRole="ANALYST";
+    const analystOAuth=await begin(adminCookie);
+    const analystRejected=await ctx.request(`/oauth/linkedin/callback?code=fake&state=${encodeURIComponent(analystOAuth.state)}`,"GET",null,{Cookie:`${adminCookie}; ${analystOAuth.cookie}`});
+    assert.equal(analystRejected.status,403);
+    const overAccountLimit = await ctx.request("/oauth/instagram/start", "GET", null, { Cookie: adminCookie });
+    assert.equal(overAccountLimit.status, 429);
+
+    const forbiddenInvite = await ctx.request("/api/auth/register", "POST", { email: "writer@klirline.ca", password: "another-secure-password" }, { Cookie: adminCookie });
+    assert.equal(forbiddenInvite.status, 403);
+    const saltBytes = Uint8Array.from({ length: 16 }, (_, i) => i + 1); const salt = base64url(saltBytes);
+    const passwordHash = await testPasswordHash("another-secure-password", saltBytes);
+    ctx.sqlite.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) VALUES(?,?,?,?,?,?,?)").run("writer-id", "writer@klirline.ca", salt, passwordHash, "redacteur", "klirline", new Date().toISOString());
+    const login = await ctx.request("/api/auth/login", "POST", { email: "writer@klirline.ca", password: "another-secure-password" });
+    const readerCookie = login.headers.get("set-cookie").split(";")[0];
+    const deniedOAuth = await ctx.request("/oauth/linkedin/start", "GET", null, { Cookie: readerCookie });
+    assert.equal(deniedOAuth.status, 403);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("publication adapters send image posts to Instagram, Facebook Page, LinkedIn, Threads, X, and Pinterest", async () => {
+  const ctx = fixture({
+    META_APP_ID: "meta-client", META_APP_SECRET: "meta-secret",
+    INSTAGRAM_REDIRECT_URI: "https://api.test/oauth/instagram/callback",
+    FACEBOOK_REDIRECT_URI: "https://api.test/oauth/facebook/callback",
+    LINKEDIN_ORGANIZATION_NAME: "Klirline Inc.", THREADS_APP_ID:"threads-client",THREADS_APP_SECRET:"threads-secret",THREADS_REDIRECT_URI:"https://api.test/oauth/threads/callback", X_CLIENT_ID:"x-client",X_CLIENT_SECRET:"x-secret",X_REDIRECT_URI:"https://api.test/oauth/x/callback", PINTEREST_APP_ID:"pinterest-client",PINTEREST_APP_SECRET:"pinterest-secret",PINTEREST_REDIRECT_URI:"https://api.test/oauth/pinterest/callback",WORKSPACE_MAX_CONNECTED_ACCOUNTS:100
+  });
+  const cookie = await bootstrap(ctx);
+  const calls = [];
+  let rejectFacebook = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    calls.push({ url: target, method: init.method || "GET", headers: new Headers(init.headers || {}), body: init.body });
+    if (target.includes("graph.instagram.com/access_token")) return Response.json({ access_token: "instagram-long-lived-token", expires_in: 5184000, token_type: "bearer" });
+    if (target.includes("graph.instagram.com/refresh_access_token")) return Response.json({ access_token: "instagram-refreshed-token", expires_in: 5184000, token_type: "bearer" });
+    if (target.includes("graph.threads.net/access_token")) return Response.json({access_token:"threads-long-lived-token",expires_in:5184000,token_type:"bearer"});
+    if (target.includes("graph.threads.net/refresh_access_token")) return Response.json({access_token:"threads-refreshed-token",expires_in:5184000,token_type:"bearer"});
+    if (target === "https://api.x.com/2/oauth2/token") {
+      if (String(calls.at(-1)?.body || "").includes("grant_type=refresh_token")) return Response.json({ access_token:"x-refreshed-token",refresh_token:"x-next-refresh-token",expires_in:7200 });
+      return Response.json({ access_token:"x-user-token",refresh_token:"x-refresh-token",expires_in:7200,scope:"tweet.read tweet.write users.read offline.access media.write" });
+    }
+    if (target === "https://api.pinterest.com/v5/oauth/token") {
+      if (String(calls.at(-1)?.body || "").includes("grant_type=refresh_token")) return Response.json({access_token:"pinterest-refreshed-token",refresh_token:"pinterest-next-refresh",expires_in:2592000,refresh_token_expires_in:31536000});
+      return Response.json({access_token:"pinterest-user-token",refresh_token:"pinterest-refresh-token",expires_in:2592000,refresh_token_expires_in:31536000,scope:"boards:read pins:write"});
+    }
+    if (target.includes("/oauth/access_token") || target.includes("/oauth/v2/accessToken")) {
+      if (target.includes("linkedin") && String(calls.at(-1)?.body || "").includes("grant_type=refresh_token")) return Response.json({ access_token: "linkedin-refreshed-token", expires_in: 3600, refresh_token: "linkedin-next-refresh-token", refresh_token_expires_in: 86400 });
+      const token = target.includes("linkedin") ? "linkedin-user-token" : target.includes("graph.facebook.com") ? "facebook-user-token" : target.includes("graph.threads.net") ? "threads-short-lived-token" : "instagram-short-lived-token";
+      return Response.json({ access_token: token, expires_in: 3600, ...(target.includes("linkedin") ? { refresh_token: "linkedin-refresh-token", refresh_token_expires_in: 86400 } : {}) });
+    }
+    if (target.includes("graph.instagram.com/v26.0/me")) return Response.json({ user_id: "ig-account-1", username: "klirlineofficial" });
+    if (target.includes("graph.facebook.com/v26.0/me?")) return Response.json({ id: "fb-user-1", name: "Klirline Admin" });
+    if (target.includes("graph.facebook.com/v26.0/me/accounts")) return Response.json({ data: [{ id: "page-123", name: "Klirline Canada", access_token: "facebook-page-token", tasks: ["CREATE_CONTENT"] },{id:"page-456",name:"Klirline France",access_token:"facebook-page-token-fr",tasks:["CREATE_CONTENT"]}] });
+    if (target.includes("api.linkedin.com/v2/userinfo")) return Response.json({ sub: "li-member-1", name: "Klirline Admin" });
+    if (target.includes("graph.threads.net/v1.0/me?fields=id,username")) return Response.json({id:"threads-account-1",username:"klirlineofficial"});
+    if (target.includes("api.x.com/2/users/me")) return Response.json({data:{id:"x-user-1",name:"Klirline",username:"klirlineOffice"}});
+    if (target === "https://api.pinterest.com/v5/user_account") return Response.json({id:"pinterest-user-1",username:"klirlineofficial",account_type:"BUSINESS"});
+    if (target === "https://api.pinterest.com/v5/boards?page_size=250") return Response.json({items:[{id:"board-1",name:"Klirline Services"}],bookmark:null});
+    if (target === "https://api.pinterest.com/v5/boards/board-1") return Response.json({id:"board-1",name:"Klirline Services",owner:{username:"klirlineofficial"}});
+    if (target === "https://api.pinterest.com/v5/pins") return Response.json({id:"pin-published-1"},{status:201});
+    if (target === "https://api.x.com/2/media/upload") return Response.json({data:{id:"x-media-1"}});
+    if (target === "https://api.x.com/2/tweets") return Response.json({data:{id:"x-published-1",text:"Klirline"}}, {status:201});
+    if (target.includes("organizationAcls")) return Response.json({ elements: [{ state: "APPROVED", role: "ADMINISTRATOR", organization: ctx.env.LINKEDIN_ORGANIZATION_URN }] });
+    if (target.includes("graph.instagram.com/v26.0/ig-account-1/media_publish")) return Response.json({ id: "ig-published-1" });
+    if (target.includes("graph.instagram.com/v26.0/ig-account-1/media")) return Response.json({ id: "ig-container-1" });
+    if (target.includes("graph.facebook.com/v26.0/page-123/photos")) {
+      if (rejectFacebook) return Response.json({ error: { message: "Rate limit" } }, { status: 429 });
+      return Response.json({ id: "fb-photo-1", post_id: "fb-published-1" });
+    }
+    if (target.includes("graph.facebook.com/v26.0/page-456/photos")) return Response.json({id:"fb-photo-fr",post_id:"fb-published-fr"});
+    if (target.includes("api.linkedin.com/rest/images?action=initializeUpload")) return Response.json({ value: { uploadUrl: "https://upload.linkedin.test/image", image: "urn:li:image:image-1" } });
+    if (target === "https://upload.linkedin.test/image") return new Response(null, { status: 201 });
+    if (target.includes("api.linkedin.com/rest/images/urn%3Ali%3Aimage%3Aimage-1")) return Response.json({ status: "AVAILABLE" });
+    if (target === "https://api.linkedin.com/rest/posts") return new Response("{}", { status: 201, headers: { "x-restli-id": "urn:li:share:linkedin-published-1" } });
+    if (target.includes("graph.threads.net/v1.0/threads-account-1/threads_publish")) return Response.json({id:"threads-published-1"});
+    if (target.includes("graph.threads.net/v1.0/threads-account-1/threads")) return Response.json({id:"threads-container-1"});
+    throw new Error(`Unexpected mocked provider request: ${target}`);
+  };
+  try {
+    let threadsAuthorization; let xAuthorization; let pinterestAuthorization;
+    for (const provider of ["instagram", "facebook", "linkedin", "threads", "x", "pinterest"]) {
+      const start = await ctx.request(`/oauth/${provider}/start`, "GET", null, { Cookie: cookie });
+      assert.equal(start.status, 302);
+      if(provider==="threads") threadsAuthorization=new URL(start.headers.get("location"));
+      if(provider==="x") { xAuthorization=new URL(start.headers.get("location")); assert.equal(xAuthorization.searchParams.get("code_challenge_method"),"S256"); assert.ok(xAuthorization.searchParams.get("code_challenge")); }
+      if(provider==="pinterest") pinterestAuthorization=new URL(start.headers.get("location"));
+      const stateCookie = start.headers.get("set-cookie").split(";")[0];
+      const state = new URL(start.headers.get("location")).searchParams.get("state");
+      const callback = await ctx.request(`/oauth/${provider}/callback?code=fake-${provider}&state=${encodeURIComponent(state)}`, "GET", null, { Cookie: `${cookie}; ${stateCookie}` });
+      assert.equal(callback.status, 302, await callback.clone().text());
+    }
+
+    const connectedAccounts=await (await ctx.request("/api/connections","GET",null,{Cookie:cookie})).json();
+    const facebookAccounts=connectedAccounts.filter(connection=>connection.provider==="facebook");
+    assert.equal(facebookAccounts.length,2);
+
+    assert.equal(pinterestAuthorization.searchParams.get("scope"),"boards:read,pins:write");
+    const pinterestBoards=await ctx.request("/api/pinterest/boards","GET",null,{Cookie:cookie});
+    assert.equal((await pinterestBoards.json()).items[0].id,"board-1");
+    const pinterestBoard=await ctx.request("/api/pinterest/board","POST",{boardId:"board-1"},{Cookie:cookie});
+    assert.equal(pinterestBoard.status,200);
+
+    ctx.sqlite.prepare("UPDATE connections SET expires_at=? WHERE provider IN ('instagram','linkedin','threads','x','pinterest')").run(new Date(Date.now() - 1000).toISOString());
+
+    const form = new FormData();
+    form.append("file", new Blob([Uint8Array.from([255, 216, 255, 0])], { type: "image/jpeg" }), "campaign.jpg");
+    const uploaded = await (await ctx.request("/api/media", "POST", form, { Cookie: cookie })).json();
+    const publishPayload={text:"Découvrez les services Klirline",targets:["instagram",{provider:"facebook",connectionId:facebookAccounts[0].id},"linkedin","threads","x","pinterest"],mediaId:uploaded.id};
+    publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+    const response = await ctx.request("/api/publish", "POST", publishPayload, { Cookie: cookie, "Idempotency-Key": "four-network-image-post" });
+    const publication = await response.json();
+    assert.equal(response.status, 200);
+    assert.deepEqual(publication.results.map((item) => item.status), ["published", "published", "published", "published", "published", "published"]);
+    assert.deepEqual(publication.results.map((item) => item.postId), ["ig-published-1", "fb-published-1", "urn:li:share:linkedin-published-1","threads-published-1","x-published-1","pin-published-1"]);
+    const linkedInPostCall = calls.find((call) => call.url === "https://api.linkedin.com/rest/posts");
+    const linkedInPostBody = JSON.parse(linkedInPostCall.body);
+    assert.deepEqual(linkedInPostBody.content, { media: { id: "urn:li:image:image-1" } });
+    assert.equal(calls.find((call) => call.url.includes("instagram.com/v26.0/ig-account-1/media_publish")).headers.get("authorization"), "Bearer instagram-refreshed-token");
+    assert.ok(calls.some((call) => call.url.includes("graph.instagram.com/access_token") && new URL(call.url).searchParams.get("grant_type") === "ig_exchange_token"));
+    assert.ok(calls.some((call) => call.url.includes("graph.instagram.com/refresh_access_token") && new URL(call.url).searchParams.get("grant_type") === "ig_refresh_token"));
+    assert.equal(calls.find((call) => call.url.includes("facebook.com/v26.0/page-123/photos")).headers.get("authorization"), "Bearer facebook-page-token");
+    assert.equal(linkedInPostCall.headers.get("authorization"), "Bearer linkedin-refreshed-token");
+    assert.ok(calls.some((call) => call.url.includes("/oauth/v2/accessToken") && String(call.body).includes("grant_type=refresh_token")));
+    assert.equal(calls.find((call) => call.url === "https://api.linkedin.com/rest/posts").headers.get("linkedin-version"), "202610");
+    assert.equal(calls.find((call) => call.url.includes("threads_publish")).headers.get("authorization"),"Bearer threads-refreshed-token");
+    assert.equal(threadsAuthorization.searchParams.get("scope"),"threads_basic,threads_content_publish");
+    assert.ok(calls.some((call)=>call.url.includes("graph.threads.net/access_token")&&new URL(call.url).searchParams.get("grant_type")==="th_exchange_token"));
+    assert.ok(calls.some((call)=>call.url.includes("graph.threads.net/refresh_access_token")&&new URL(call.url).searchParams.get("grant_type")==="th_refresh_token"));
+    assert.equal(xAuthorization.searchParams.get("scope"),"tweet.read tweet.write users.read offline.access media.write");
+    assert.ok(calls.some(call=>call.url==="https://api.x.com/2/oauth2/token"&&String(call.body).includes("code_verifier=")));
+    const xCodeExchange = calls.find(call=>call.url==="https://api.x.com/2/oauth2/token"&&String(call.body).includes("grant_type=authorization_code"));
+    const xCodeVerifier = new URLSearchParams(xCodeExchange.body).get("code_verifier");
+    assert.equal(base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(xCodeVerifier)))),xAuthorization.searchParams.get("code_challenge"));
+    assert.ok(calls.some(call=>call.url==="https://api.x.com/2/oauth2/token"&&String(call.body).includes("grant_type=refresh_token")));
+    assert.equal(calls.find(call=>call.url==="https://api.x.com/2/tweets").headers.get("authorization"),"Bearer x-refreshed-token");
+    assert.equal(JSON.parse(calls.find(call=>call.url==="https://api.x.com/2/tweets").body).media.media_ids[0],"x-media-1");
+    assert.ok(calls.some(call=>call.url==="https://api.pinterest.com/v5/oauth/token"&&String(call.body).includes("grant_type=refresh_token")));
+    assert.equal(calls.find(call=>call.url==="https://api.pinterest.com/v5/pins").headers.get("authorization"),"Bearer pinterest-refreshed-token");
+    assert.equal(JSON.parse(calls.find(call=>call.url==="https://api.pinterest.com/v5/pins").body).board_id,"board-1");
+    assert.equal(JSON.parse(calls.find(call=>call.url==="https://api.pinterest.com/v5/pins").body).media_source.source_type,"image_url");
+    const threadsPayload={text:"Campagne Threads sans image",targets:["threads"]};
+    threadsPayload.draftId=await approveCampaignDraft(ctx,cookie,threadsPayload);
+    const textOnly=await ctx.request("/api/publish","POST",threadsPayload,{Cookie:cookie,"Idempotency-Key":"threads-text-only-post"});
+    assert.equal(textOnly.status,200);
+    assert.equal((await textOnly.json()).results[0].postId,"threads-container-1");
+    assert.equal(calls.filter(call=>call.url.includes("threads_publish")).length,1,"text posts are auto-published by the Threads text container");
+    const xPayload={text:"Campagne X sans image",targets:["x"]};
+    xPayload.draftId=await approveCampaignDraft(ctx,cookie,xPayload);
+    const xTextOnly = await ctx.request("/api/publish","POST",xPayload,{Cookie:cookie,"Idempotency-Key":"x-text-only-post"});
+    assert.equal(xTextOnly.status,200);
+    assert.equal((await xTextOnly.json()).results[0].postId,"x-published-1");
+    rejectFacebook = true;
+    const partialPayload={text:"Mise à jour Klirline",targets:["instagram",{provider:"facebook",connectionId:facebookAccounts[0].id},"linkedin","threads","x","pinterest"],mediaId:uploaded.id};
+    partialPayload.draftId=await approveCampaignDraft(ctx,cookie,partialPayload);
+    const partial = await ctx.request("/api/publish", "POST", partialPayload, { Cookie: cookie, "Idempotency-Key": "partial-three-network-post" });
+    const partialResults = (await partial.json()).results;
+    assert.deepEqual(partialResults.map((item) => item.status), ["published", "failed", "published", "published", "published", "published"]);
+    assert.equal(partialResults[1].retryable, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Bluesky exposes public OAuth metadata and rejects unsupported handle input", async () => {
+  const ctx = fixture();
+  const metadataResponse = await ctx.request("/oauth/bluesky/client-metadata.json");
+  assert.equal(metadataResponse.status, 200);
+  const metadata = await metadataResponse.json();
+  assert.equal(metadata.client_id, "https://api.test/oauth/bluesky/client-metadata.json");
+  assert.equal(metadata.dpop_bound_access_tokens, true);
+  assert.match(metadata.scope, /repo:app\.bsky\.feed\.post\?action=create/);
+
+  const cookie = await bootstrap(ctx);
+  const response = await ctx.request("/oauth/bluesky/start", "POST", { handle: "not-a-bsky-handle.example" }, { Cookie: cookie });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "bluesky-handle-must-be-bsky-social");
+});
+
+test("regional account migration preserves existing connections and scheduled results", () => {
+  const sqlite=new DatabaseSync(":memory:");
+  sqlite.exec("PRAGMA foreign_keys=ON");
+  const migrations=readdirSync(new URL("../migrations/",import.meta.url)).filter(name=>/^\d+_.+\.sql$/.test(name)).sort();
+  for(const migration of migrations.filter(name=>Number(name.slice(0,4))<15))sqlite.exec(readFileSync(new URL(`../migrations/${migration}`,import.meta.url),"utf8"));
+  const now=new Date().toISOString();
+  sqlite.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) VALUES('owner','owner@klirline.ca','salt','hash','admin','klirline',?)").run(now);
+  sqlite.prepare("INSERT INTO connections(id,user_id,provider,account_id,account_label,token_ciphertext,token_iv,created_at) VALUES('existing-fb','owner','facebook','page-ca','Klirline Canada','cipher','iv',?)").run(now);
+  sqlite.prepare("INSERT INTO scheduled_posts(id,user_id,text,targets_json,status,run_at,created_at) VALUES('old-job','owner','Old campaign','[\"facebook\"]','queued',?,?)").run(new Date(Date.now()+120000).toISOString(),now);
+  sqlite.prepare("INSERT INTO scheduled_results(job_id,provider,status,attempts,next_run_at) VALUES('old-job','facebook','queued',0,?)").run(new Date(Date.now()+120000).toISOString());
+  sqlite.exec(readFileSync(new URL("../migrations/0015_regional_social_accounts.sql",import.meta.url),"utf8"));
+  assert.equal(sqlite.prepare("SELECT org_id,account_id FROM connections WHERE id='existing-fb'").get().org_id,"klirline");
+  assert.equal(sqlite.prepare("SELECT account_id FROM connections WHERE id='existing-fb'").get().account_id,"page-ca");
+  const savedResult=sqlite.prepare("SELECT target_key,connection_id FROM scheduled_results WHERE job_id='old-job'").get();
+  assert.equal(savedResult.target_key,"facebook");
+  assert.equal(savedResult.connection_id,null);
+  sqlite.prepare("INSERT INTO connections(id,user_id,org_id,provider,account_id,account_label,token_ciphertext,token_iv,created_at) VALUES('second-fb','owner','klirline','facebook','page-fr','Klirline France','cipher','iv',?)").run(now);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM connections WHERE provider='facebook'").get().count,2);
+});
+
+test("campaign publishing and scheduling target multiple regional accounts on one network", async () => {
+  const ctx=fixture();
+  const cookie=await bootstrap(ctx);
+  const userId=ctx.sqlite.prepare("SELECT id FROM users WHERE email='owner@klirline.ca'").get().id;
+  const rawKey=Uint8Array.from(ctx.env.TOKENS_ENCRYPTION_KEY_HEX.match(/../g),byte=>parseInt(byte,16));
+  const encryptToken=async token=>{
+    const iv=crypto.getRandomValues(new Uint8Array(12));
+    const key=await crypto.subtle.importKey("raw",rawKey,"AES-GCM",false,["encrypt"]);
+    const cipher=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,new TextEncoder().encode(JSON.stringify({accessToken:token}))));
+    return {iv:base64url(iv),cipher:base64url(cipher)};
+  };
+  const accounts=[{id:"fb-ca",page:"page-ca",label:"Klirline Canada",token:"token-ca"},{id:"fb-fr",page:"page-fr",label:"Klirline France",token:"token-fr"}];
+  for(const account of accounts){
+    const sealed=await encryptToken(account.token);
+    ctx.sqlite.prepare("INSERT INTO connections(id,user_id,org_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+      .run(account.id,userId,"klirline","facebook",account.page,account.label,JSON.stringify({id:account.page,label:account.label}),"[]",sealed.cipher,sealed.iv,new Date().toISOString());
+  }
+  const connections=await (await ctx.request("/api/connections","GET",null,{Cookie:cookie})).json();
+  assert.equal(connections.filter(connection=>connection.provider==="facebook").length,2);
+  const calls=[];
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url,init={})=>{
+    calls.push({url:String(url),authorization:new Headers(init.headers||{}).get("authorization")});
+    const page=String(url).includes("page-ca")?"page-ca":"page-fr";
+    return Response.json({id:`${page}-post`});
+  };
+  try{
+    const targets=accounts.map(account=>({provider:"facebook",connectionId:account.id}));
+    const publishPayload={text:"Promotion par marché",targets};
+    publishPayload.draftId=await approveCampaignDraft(ctx,cookie,publishPayload);
+    const published=await ctx.request("/api/publish","POST",publishPayload,{Cookie:cookie});
+    assert.equal(published.status,200,await published.clone().text());
+    const publication=await published.json();
+    assert.deepEqual(publication.results.map(result=>result.postId),["page-ca-post","page-fr-post"]);
+    assert.deepEqual(publication.results.map(result=>result.accountLabel),["Klirline Canada","Klirline France"]);
+    assert.deepEqual(calls.map(call=>call.authorization).sort(),["Bearer token-ca","Bearer token-fr"].sort());
+
+    const schedulePayload={text:"Promotion programmée par marché",targets,runAtUTC:new Date(Date.now()+120000).toISOString(),timezone:"Europe/Paris"};
+    schedulePayload.draftId=await approveCampaignDraft(ctx,cookie,schedulePayload);
+    const scheduled=await ctx.request("/api/scheduled","POST",schedulePayload,{Cookie:cookie});
+    assert.equal(scheduled.status,200,await scheduled.clone().text());
+    const job=(await scheduled.json()).job;
+    assert.equal(job.targets.length,2);
+    assert.equal(ctx.sqlite.prepare("SELECT COUNT(*) AS count FROM scheduled_results WHERE job_id=?").get(job.id).count,2);
+
+    const legacyDraftId=await approveCampaignDraft(ctx,cookie,{text:"Legacy single provider",targets:["facebook"]});
+    const ambiguous=await ctx.request("/api/publish","POST",{text:"Legacy single provider",targets:["facebook"],draftId:legacyDraftId},{Cookie:cookie});
+    assert.equal((await ambiguous.json()).results[0].message,"target-account-selection-required");
+  }finally{globalThis.fetch=originalFetch}
+});

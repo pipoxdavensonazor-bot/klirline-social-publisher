@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "klirline-social-publisher",
+  "compatibility_date": "2026-10-21",
+  "previews": {},
+  "assets": {
+    "directory": "./site",
+    "not_found_handling": "404-page"
+  }
+}

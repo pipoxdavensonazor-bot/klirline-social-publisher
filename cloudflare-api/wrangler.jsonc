@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "klirline-social-api",
+  "main": "src/index.js",
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "social-api.klirline.ca", "custom_domain": true }
+  ],
+  "compatibility_date": "2026-10-21",
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["* * * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "klirline-social",
+      "database_id": "8bd257f1-0a92-4fbe-b1d9-1a85dbaf0875",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "klirline-social-media" }
+  ],
+  "vars": {
+    "FRONTEND_ORIGIN": "https://klirline-social-publisher.pipoxdavensonazor.workers.dev,https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev,https://commercial-readiness.social-preview.klirline.ca",
+    "PUBLIC_BASE_URL": "https://social-api.klirline.ca",
+    "META_GRAPH_VERSION": "v26.0",
+    "THREADS_API_VERSION": "v1.0",
+    "THREADS_APP_ID": "",
+    "THREADS_REDIRECT_URI": "https://social-api.klirline.ca/oauth/threads/callback",
+    "X_CLIENT_ID": "",
+    "X_REDIRECT_URI": "https://social-api.klirline.ca/oauth/x/callback",
+    "PINTEREST_APP_ID": "",
+    "PINTEREST_REDIRECT_URI": "https://social-api.klirline.ca/oauth/pinterest/callback",
+    "LINKEDIN_VERSION": "202610",
+    "LINKEDIN_ORGANIZATION_URN": "",
+    "LINKEDIN_ORGANIZATION_NAME": "",
+    "META_APP_ID": "",
+    "ALLOW_PUBLIC_SIGNUP": "false",
+    "INTERNAL_MODE": "true",
+    "REQUIRE_APPROVED_DRAFTS": "true",
+    "WORKSPACE_MAX_CONNECTED_ACCOUNTS": "100",
+    "WORKSPACE_MONTHLY_PUBLICATION_CAP": "5000",
+    "INSTAGRAM_REDIRECT_URI": "https://social-api.klirline.ca/oauth/instagram/callback",
+    "FACEBOOK_REDIRECT_URI": "https://social-api.klirline.ca/oauth/facebook/callback",
+    "LINKEDIN_CLIENT_ID": "",
+    "LINKEDIN_REDIRECT_URI": "https://social-api.klirline.ca/oauth/linkedin/callback",
+    "COMPANY_LEGAL_NAME": "Klirline Inc.",
+    "PRIVACY_CONTACT_EMAIL": "contact@klirline.ca"
+  }
+}

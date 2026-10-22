@@ -4,7 +4,7 @@ export const LEGAL = {
     title: "Politique de confidentialite",
     updated: "2026-10-21",
     body: [
-      "Responsable : Klirline Services (mono-entreprise, puis multi-clients). Contact : a renseigner.",
+      "Responsable : a renseigner avant lancement. Contact : a renseigner.",
       "Donnees : compte utilisateur (email, role), connexions OAuth (labels de compte, scopes, expiration — JAMAIS les mots de passe), contenus rediges, journaux d envoi, medias temporaires.",
       "Jetons OAuth : echanges et chiffres cote serveur (AES-256-GCM), jamais exposes au navigateur ni stockes en localStorage.",
       "Medias : stockes temporairement pour l envoi, supprimes selon la politique (30 jours max par defaut).",
@@ -15,7 +15,7 @@ export const LEGAL = {
   terms: {
     title: "Conditions d utilisation",
     body: [
-      "Usage prevu : Klirline interne d abord. L ouverture a des clients exige une app publique par fournisseur (revues).",
+      "Usage prevu : outil interne reserve aux membres autorises de l equipe Klirline. Aucune inscription publique ni facturation.",
       "Interdit : partager des mots de passe, automatiser les navigateurs contre les CGU des plateformes, publier sur un compte sans consentement OAuth du proprietaire.",
       "Limites : quotas et regles de chaque plateforme (X, TikTok audit, LinkedIn approbation…) s appliquent.",
       "Twitch : clips/annonces/gestion de chaine uniquement — pas de cross-post generique.",
@@ -24,10 +24,10 @@ export const LEGAL = {
   deletion: {
     title: "Suppression des donnees",
     body: [
-      "Dans l app : Deconnecter un reseau supprime sa connexion et planifie la revocation du jeton.",
-      "Demande complete : ecrivez a l adresse de contact avec l email du compte — suppression sous 30 jours (compte, connexions, contenus, medias, jobs).",
+      "Dans l app : utilisez Préférences > Supprimer mon compte pour supprimer le compte, ses connexions enregistrées, contenus, programmation et médias du serveur après confirmation du mot de passe.",
+      "La suppression locale du jeton ne retire pas automatiquement l’autorisation accordée à la plateforme sociale. Révoquez également l’accès Klirline dans les paramètres de chaque réseau connecté.",
       "Consequence : les publications deja effectuees sur les reseaux restent soumises aux outils de suppression de chaque plateforme.",
-      "Statut : a integrer comme URL officielle dans chaque console developpeur (Meta, LinkedIn, TikTok…), exige pour les revues.",
+      "Pour toute demande d’assistance à la suppression, contactez le responsable à l’adresse de confidentialité publiée sur le site.",
     ],
   },
 };

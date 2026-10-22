@@ -1,0 +1,22 @@
+{
+  "name": "klirline-social-cloudflare-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test",
+    "build:x-text": "node scripts/build-x-text.mjs",
+    "db:local": "wrangler d1 migrations apply klirline-social --local",
+    "db:remote": "wrangler d1 migrations apply klirline-social --remote"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "@atproto/api": "0.29.0",
+    "@atproto/oauth-client-node": "0.5.11",
+    "twitter-text": "3.1.0"
+  }
+}

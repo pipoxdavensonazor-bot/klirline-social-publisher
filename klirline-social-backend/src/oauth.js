@@ -7,8 +7,9 @@ import { signState, verifyState, pkcePair, encryptToken, saveDb, uid } from "./l
 const pkceStore = new Map(); // stateId -> verifier (memoire serveur, 10 min)
 
 function redirectUri(env, provider) {
-  const key = { instagram: "META_REDIRECT_URI", facebook: "META_REDIRECT_URI", threads: "META_REDIRECT_URI", linkedin: "LINKEDIN_REDIRECT_URI", x: "X_REDIRECT_URI", pinterest: "PINTEREST_REDIRECT_URI", tiktok: "TIKTOK_REDIRECT_URI", twitch: "TWITCH_REDIRECT_URI", bluesky: "BLUESKY_REDIRECT_URI" }[provider];
-  return (env[key] || "").replace("${PUBLIC_BASE_URL}", env.PUBLIC_BASE_URL || "");
+  const key = { instagram: "INSTAGRAM_REDIRECT_URI", facebook: "FACEBOOK_REDIRECT_URI", threads: "THREADS_REDIRECT_URI", linkedin: "LINKEDIN_REDIRECT_URI", x: "X_REDIRECT_URI", pinterest: "PINTEREST_REDIRECT_URI", tiktok: "TIKTOK_REDIRECT_URI", twitch: "TWITCH_REDIRECT_URI", bluesky: "BLUESKY_REDIRECT_URI" }[provider];
+  const fallback = ["instagram", "facebook", "threads"].includes(provider) ? env.META_REDIRECT_URI : "";
+  return (env[key] || fallback || "").replace("${PUBLIC_BASE_URL}", env.PUBLIC_BASE_URL || "");
 }
 function clientId(env, provider) {
   return { instagram: env.META_APP_ID, facebook: env.META_APP_ID, threads: env.META_APP_ID, linkedin: env.LINKEDIN_CLIENT_ID, x: env.X_CLIENT_ID, pinterest: env.PINTEREST_APP_ID, tiktok: env.TIKTOK_CLIENT_KEY, twitch: env.TWITCH_CLIENT_ID, bluesky: env.BLUESKY_CLIENT_METADATA_URL }[provider] || "";
@@ -20,7 +21,7 @@ function clientSecret(env, provider) {
 export function startOAuth(env, provider, user) {
   if (!PROVIDERS[provider]) throw Object.assign(new Error("unknown-provider"), { status: 400 });
   if (provider === "bluesky") throw Object.assign(new Error("bluesky-oauth-requires-atproto-oauth-client"), { status: 501 });
-  const scopes = PROVIDERS[provider].scopes.join(["tiktok", "instagram", "threads"].includes(provider) ? "," : " ");
+  const scopes = PROVIDERS[provider].scopes.join(["tiktok", "instagram", "facebook", "threads"].includes(provider) ? "," : " ");
   const state = signState(env, { uid: user.id, provider, exp: Date.now() + 10 * 60 * 1000, n: uid() });
   const ru = redirectUri(env, provider);
   const id = clientId(env, provider);
@@ -71,7 +72,7 @@ export async function finishOAuth(env, db, { provider, code, state }) {
 async function verifyAccount(provider, accessToken, env) {
   let url, headers = { Authorization: "Bearer " + accessToken };
   if (provider === "facebook") {
-    const version = env.META_GRAPH_VERSION || "v25.0";
+    const version = env.META_GRAPH_VERSION || "v26.0";
     const me = await readIdentity(`https://graph.facebook.com/${version}/me?fields=id,name`, headers);
     if (!env.FACEBOOK_PAGE_ID) throw Object.assign(new Error("facebook-page-id-required"), { status: 409 });
     const pages = await readIdentity(`https://graph.facebook.com/${version}/me/accounts?fields=id,name,access_token,tasks`, headers);
@@ -79,8 +80,8 @@ async function verifyAccount(provider, accessToken, env) {
     if (!page?.access_token || !(page.tasks || []).some((t) => ["CREATE_CONTENT", "MANAGE"].includes(t))) throw Object.assign(new Error("facebook-page-not-accessible-for-publishing"), { status: 403 });
     return { id: page.id, label: page.name, ownerId: me.id, connectionToken: page.access_token };
   }
-  else if (provider === "instagram") url = "https://graph.instagram.com/v1.0/me?fields=id,username";
-  else if (provider === "threads") url = "https://graph.threads.net/v1.0/me?fields=id,username";
+  else if (provider === "instagram") url = `https://graph.instagram.com/${env.META_GRAPH_VERSION || "v26.0"}/me?fields=user_id,username`;
+  else if (provider === "threads") url = `https://graph.threads.com/${env.THREADS_API_VERSION || "v1.0"}/me?fields=id,username`;
   else if (provider === "linkedin") url = "https://api.linkedin.com/v2/userinfo";
   else if (provider === "x") url = "https://api.x.com/2/users/me?user.fields=id,name,username";
   else if (provider === "pinterest") url = "https://api.pinterest.com/v5/user_account";
@@ -113,6 +114,11 @@ async function exchangeToken(provider, { code, ru, verifier, env, secret }) {
     const form = new FormData();
     Object.entries({ client_id: id, client_secret: secret, grant_type: "authorization_code", redirect_uri: ru, code }).forEach(([k, v]) => form.set(k, v || ""));
     return readToken(await fetch(endpoint, { method: "POST", body: form }));
+  }
+  if (provider === "threads") {
+    const url = new URL(endpoint);
+    Object.entries({ client_id: id, client_secret: secret, grant_type: "authorization_code", redirect_uri: ru, code }).forEach(([k, v]) => url.searchParams.set(k, v || ""));
+    return readToken(await fetch(url, { method: "POST" }));
   }
   if (provider === "pinterest") {
     const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: ru });
