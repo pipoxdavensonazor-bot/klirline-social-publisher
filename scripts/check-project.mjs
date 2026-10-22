@@ -66,10 +66,18 @@ assert.equal(xTextContext.KlirlineXText.xTextMetrics("https://example.com/a/very
 if (!html.includes('<script src="vendor/klirline-x-text-3.1.0.js"></script>')) throw new Error("The browser X validator is not loaded by index.html");
 console.log("Browser X weighted-length checks: PASS");
 
-JSON.parse(readFileSync(new URL("../cloudflare-api/wrangler.jsonc", import.meta.url), "utf8"));
+const apiWorker = JSON.parse(readFileSync(new URL("../cloudflare-api/wrangler.jsonc", import.meta.url), "utf8"));
 JSON.parse(readFileSync(new URL("../cloudflare-api/package.json", import.meta.url), "utf8"));
 const staticWorker = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
 const rootPackage = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const applicationSource = inlineScripts.join("\n");
+const allowedOriginsSource = applicationSource.match(/API_ALLOWED_FRONTEND_ORIGINS=(\[[^;]+\])/);
+if (!allowedOriginsSource) throw new Error("The frontend must explain which preview origins can use the API.");
+const frontendOrigins = Array.from(allowedOriginsSource[1].matchAll(/[\"']([^\"']+)[\"']/g), (match) => match[1]);
+assert.deepEqual(frontendOrigins, apiWorker.vars.FRONTEND_ORIGIN.split(",").map((origin) => origin.trim()));
+if (!applicationSource.includes("Cette preview temporaire de build n’est pas autorisée à appeler l’API") || !applicationSource.includes("preview stable de la branche")) {
+  throw new Error("Un build preview non autorisé doit link to the stable API-enabled branch preview.");
+}
 if (staticWorker.name !== "klirline-social-publisher") throw new Error("Static Worker name must match the Cloudflare service.");
 if (staticWorker.assets?.directory !== "./site") throw new Error("Static Worker must serve only the generated site/ directory.");
 if (!staticWorker.previews || typeof staticWorker.previews !== "object") throw new Error("Worker preview builds require a previews configuration block.");
