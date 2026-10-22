@@ -15,7 +15,10 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["campaign_drafts", "publication_state"],
   ["posts", "campaign_draft_id"],
   ["scheduled_posts", "campaign_draft_id"],
-  ["media", "alt_text"]
+  ["media", "alt_text"],
+  ["connections", "org_id"],
+  ["scheduled_results", "target_key"],
+  ["scheduled_results", "connection_id"]
 ];
 // Internal operational ceiling, not a subscription entitlement. Keep it high
 // enough for regional and brand accounts while preventing accidental abuse.
@@ -294,14 +297,28 @@ async function requestFingerprint(userId, kind, data) {
 }
 function requestedTargets(value) {
   if (!Array.isArray(value) || !value.length) throw httpError("no-targets");
-  if (value.some((provider) => typeof provider !== "string" || !PROVIDERS[provider])) throw httpError("unsupported-target");
-  return [...new Set(value)];
+  const targets = value.map((value) => {
+    if (typeof value === "string") {
+      if (!PROVIDERS[value]) throw httpError("unsupported-target");
+      return { provider: value, connectionId: null };
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value) || !PROVIDERS[value.provider]) throw httpError("unsupported-target");
+    const connectionId = value.connectionId == null || value.connectionId === "" ? null : String(value.connectionId);
+    if (connectionId && (connectionId.length > 128 || !/^[A-Za-z0-9_-]+$/.test(connectionId))) throw httpError("invalid-target-account");
+    return { provider: value.provider, connectionId };
+  });
+  const unique = new Map(targets.map((target) => [targetKey(target), target]));
+  return [...unique.values()];
 }
+function targetProvider(target) { return typeof target === "string" ? target : target.provider; }
+function targetConnectionId(target) { return typeof target === "string" ? null : target.connectionId || null; }
+function targetKey(target) { return targetConnectionId(target) || targetProvider(target); }
+function sortTargets(targets) { return [...targets].sort((a, b) => targetKey(a).localeCompare(targetKey(b))); }
 function providerStatus(id, env) {
   const keys = {
     instagram: ["META_APP_ID", "META_APP_SECRET", "INSTAGRAM_REDIRECT_URI"],
-    facebook: ["META_APP_ID", "META_APP_SECRET", "FACEBOOK_REDIRECT_URI", "FACEBOOK_PAGE_ID"],
-    linkedin: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_REDIRECT_URI", "LINKEDIN_ORGANIZATION_URN", "LINKEDIN_VERSION"],
+    facebook: ["META_APP_ID", "META_APP_SECRET", "FACEBOOK_REDIRECT_URI"],
+    linkedin: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_REDIRECT_URI", "LINKEDIN_VERSION"],
     threads: ["THREADS_APP_ID", "THREADS_APP_SECRET", "THREADS_REDIRECT_URI"],
     x: ["X_CLIENT_ID", "X_CLIENT_SECRET", "X_REDIRECT_URI"],
     pinterest: ["PINTEREST_APP_ID", "PINTEREST_APP_SECRET", "PINTEREST_REDIRECT_URI"],
@@ -338,11 +355,11 @@ function providerEnv(provider, env) {
 }
 async function oauthStart(provider, user, env, db) {
   if (!LAUNCH_PROVIDERS.includes(provider)) throw httpError("provider-out-of-scope-for-mvp", 501);
-  const current = await db.prepare("SELECT id FROM connections WHERE provider=? AND user_id IN (SELECT id FROM users WHERE org_id=?) LIMIT 1").bind(provider, user.org_id).first();
-  if (!current) {
-    const count = await db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id IN (SELECT id FROM users WHERE org_id=?)").bind(user.org_id).first();
-    if (count?.count >= workspaceLimit(env, "WORKSPACE_MAX_CONNECTED_ACCOUNTS", DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached", 429);
-  }
+  const [current,count]=await Promise.all([
+    db.prepare("SELECT id FROM connections WHERE provider=? AND org_id=? LIMIT 1").bind(provider,user.org_id).first(),
+    db.prepare("SELECT COUNT(*) AS count FROM connections WHERE org_id=?").bind(user.org_id).first()
+  ]);
+  if(!current&&count?.count>=workspaceLimit(env,"WORKSPACE_MAX_CONNECTED_ACCOUNTS",DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached",429);
   const cfg = providerEnv(provider, env);
   if (!cfg.id || !cfg.secret || !cfg.redirect || !env.FRONTEND_ORIGIN || !env.PUBLIC_BASE_URL) throw httpError("missing-credentials", 503);
   const state = randomId(32); const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(state));
@@ -360,11 +377,11 @@ async function oauthStart(provider, user, env, db) {
 async function blueskyOauthStart(user, handle, env, db) {
   const normalized = String(handle || "").trim().replace(/^@/, "").toLowerCase();
   if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+bsky\.social$/.test(normalized)) throw httpError("bluesky-handle-must-be-bsky-social", 400);
-  const current = await db.prepare("SELECT id FROM connections WHERE provider='bluesky' AND user_id IN (SELECT id FROM users WHERE org_id=?) LIMIT 1").bind(user.org_id).first();
-  if (!current) {
-    const count = await db.prepare("SELECT COUNT(*) AS count FROM connections WHERE user_id IN (SELECT id FROM users WHERE org_id=?)").bind(user.org_id).first();
-    if (count?.count >= workspaceLimit(env, "WORKSPACE_MAX_CONNECTED_ACCOUNTS", DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached", 429);
-  }
+  const [current,count]=await Promise.all([
+    db.prepare("SELECT id FROM connections WHERE provider='bluesky' AND org_id=? LIMIT 1").bind(user.org_id).first(),
+    db.prepare("SELECT COUNT(*) AS count FROM connections WHERE org_id=?").bind(user.org_id).first()
+  ]);
+  if(!current&&count?.count>=workspaceLimit(env,"WORKSPACE_MAX_CONNECTED_ACCOUNTS",DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached",429);
   const client = createBlueskyOAuthClient(env, db, user.id);
   const location = await client.authorize(normalized, { state: randomId(24), ui_locales: "fr-CA fr en" });
   return { location: String(location) };
@@ -388,10 +405,7 @@ async function completeBlueskyOAuth(request, env, db) {
   if (!handle.endsWith(".bsky.social")) throw httpError("bluesky-account-handle-not-supported", 400);
   const account = { id: callback.session.did, did: callback.session.did, handle, label: `@${handle}`, displayName: String(profile.displayName || "") };
   const sealed = await sealToken(JSON.stringify({ accessToken: `atproto-session:${account.did}`, refreshToken: null }), env);
-  const id = randomId();
-  await db.prepare(`INSERT INTO connections(id,user_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,expires_at,created_at)
-    VALUES(?,?,'bluesky',?,?,?,?,?,?,NULL,?) ON CONFLICT(user_id,provider) DO UPDATE SET id=excluded.id,account_id=excluded.account_id,account_label=excluded.account_label,account_json=excluded.account_json,scopes_json=excluded.scopes_json,token_ciphertext=excluded.token_ciphertext,token_iv=excluded.token_iv,expires_at=NULL,created_at=excluded.created_at`)
-    .bind(id, user.id, account.id, account.label, JSON.stringify(account), JSON.stringify(PROVIDERS.bluesky.scopes), sealed.data, sealed.iv, nowIso()).run();
+  await saveConnection(db,user,"bluesky",account,sealed, null,env);
   await auditEvent(db,user.org_id,user.id,"social.connected","bluesky",{accountLabel:account.label});
   return "bluesky";
 }
@@ -447,51 +461,93 @@ async function completeOAuth(request, env, db) {
   if (!record) throw httpError("oauth-state-invalid-or-expired", 400);
   await db.prepare("DELETE FROM oauth_states WHERE state_hash=?").bind(stateHash).run();
   const token = await exchangeOAuth(provider, code, env, record.verifier);
-  let account; let connectionToken = token.access_token;
+  let accounts = []; let connectionToken = token.access_token;
   if (provider === "instagram") {
-    account = await graphJson(`https://graph.instagram.com/${env.META_GRAPH_VERSION || "v26.0"}/me?fields=user_id,username`, token.access_token);
-    account = { id: String(account.user_id || account.id || ""), label: account.username ? `@${account.username}` : "" };
+    const profile = await graphJson(`https://graph.instagram.com/${env.META_GRAPH_VERSION || "v26.0"}/me?fields=user_id,username`, token.access_token);
+    accounts = [{ id: String(profile.user_id || profile.id || ""), label: profile.username ? `@${profile.username}` : "" }];
   } else if (provider === "facebook") {
-    if (!env.FACEBOOK_PAGE_ID) throw httpError("facebook-page-id-required", 409);
     const graph = `https://graph.facebook.com/${env.META_GRAPH_VERSION || "v26.0"}`;
     const me = await graphJson(`${graph}/me?fields=id,name`, token.access_token);
-    const pages = await graphJson(`${graph}/me/accounts?fields=id,name,access_token,tasks`, token.access_token);
-    const page = (pages.data || []).find((item) => String(item.id) === String(env.FACEBOOK_PAGE_ID));
-    if (!page?.access_token || !(page.tasks || []).some((task) => ["CREATE_CONTENT", "MANAGE"].includes(task))) throw httpError("facebook-page-not-accessible-for-publishing", 403);
-    account = { id: page.id, label: page.name, ownerId: me.id }; connectionToken = page.access_token;
+    let pageUrl=new URL(`${graph}/me/accounts?fields=id,name,access_token,tasks&limit=100`),pages=[],pageCount=0;
+    while(pageUrl&&pageCount<20){
+      const response=await graphJson(pageUrl,token.access_token); pages.push(...(response.data||[]));
+      const next=response.paging?.next;
+      if(!next){pageUrl=null;continue;}
+      const nextUrl=new URL(next);
+      if(nextUrl.origin!=="https://graph.facebook.com"||!nextUrl.pathname.startsWith(`/${env.META_GRAPH_VERSION||"v26.0"}/me/accounts`))throw httpError("facebook-page-pagination-invalid",502);
+      pageUrl=nextUrl;pageCount++;
+    }
+    if(pageUrl)throw httpError("facebook-page-list-exceeds-safe-limit",413);
+    accounts = pages.filter((page) => page.access_token && (page.tasks || []).some((task) => ["CREATE_CONTENT", "MANAGE"].includes(task)))
+      .map((page) => ({ id: String(page.id), label: String(page.name || `Page ${page.id}`), ownerId: String(me.id), accessToken: page.access_token }));
+    if (!accounts.length) throw httpError("facebook-no-pages-accessible-for-publishing", 403);
   } else if (provider === "threads") {
     const profile=await graphJson(`https://graph.threads.net/${env.THREADS_API_VERSION||"v1.0"}/me?fields=id,username`,token.access_token);
-    account={id:String(profile.id||""),label:profile.username?`@${profile.username}`:""};
+    accounts=[{id:String(profile.id||""),label:profile.username?`@${profile.username}`:""}];
   } else if (provider === "x") {
     const profile = await graphJson("https://api.x.com/2/users/me?user.fields=id,name,username", token.access_token);
-    account = { id: String(profile.data?.id || ""), label: profile.data?.username ? `@${profile.data.username}` : String(profile.data?.name || "") };
+    accounts = [{ id: String(profile.data?.id || ""), label: profile.data?.username ? `@${profile.data.username}` : String(profile.data?.name || "") }];
   } else if (provider === "pinterest") {
     const profile = await graphJson("https://api.pinterest.com/v5/user_account", token.access_token);
     const username = String(profile.username || profile.id || "");
-    account = { id: username, label: profile.username ? `@${profile.username}` : String(profile.business_name || "Pinterest") , username: profile.username || null };
+    accounts = [{ id: username, label: profile.username ? `@${profile.username}` : String(profile.business_name || "Pinterest") , username: profile.username || null }];
   } else {
     const identity = await graphJson("https://api.linkedin.com/v2/userinfo", token.access_token);
-    if (!env.LINKEDIN_ORGANIZATION_URN || !/^urn:li:organization:\d+$/.test(env.LINKEDIN_ORGANIZATION_URN)) throw httpError("linkedin-organization-urn-required", 503);
     if (!identity.sub) throw httpError("linkedin-member-identity-missing", 502);
     const version = env.LINKEDIN_VERSION || "202610";
-    const query = new URLSearchParams({ q: "roleAssignee", state: "APPROVED", count: "100" });
-    const access = await graphJson(`https://api.linkedin.com/rest/organizationAcls?${query}`, token.access_token, { headers: { "X-Restli-Protocol-Version": "2.0.0", "Linkedin-Version": version } });
+    const publishingHeaders={"X-Restli-Protocol-Version":"2.0.0","Linkedin-Version":version};
+    const organizationEntries=[];let start=0;
+    for(let page=0;page<10;page++){
+      const query=new URLSearchParams({q:"roleAssignee",state:"APPROVED",count:"100",start:String(start)});
+      const access=await graphJson(`https://api.linkedin.com/rest/organizationAcls?${query}`,token.access_token,{headers:publishingHeaders});
+      const entries=access.elements||[];organizationEntries.push(...entries);start+=entries.length;
+      if(entries.length<100||(Number.isFinite(access.paging?.total)&&start>=access.paging.total))break;
+    }
     const publishingRoles = new Set(["ADMINISTRATOR", "DIRECT_SPONSORED_CONTENT_POSTER", "CONTENT_ADMIN", "CONTENT_ADMINISTRATOR"]);
-    const canPublish = (access.elements || []).some((entry) => entry.state === "APPROVED" && publishingRoles.has(entry.role) && entry.organization === env.LINKEDIN_ORGANIZATION_URN);
-    if (!canPublish) throw httpError("linkedin-member-lacks-organization-publishing-role", 403);
-    account = { id: env.LINKEDIN_ORGANIZATION_URN, label: env.LINKEDIN_ORGANIZATION_NAME || "LinkedIn organization", memberId: identity.sub };
+    const authorizedOrganizations = new Map(organizationEntries.filter((entry) => entry.state === "APPROVED" && publishingRoles.has(entry.role) && /^urn:li:organization:\d+$/.test(entry.organization))
+      .map((entry) => [entry.organization, entry.organization]));
+    accounts = [...authorizedOrganizations.values()].map((organization) => ({
+      id: organization,
+      label: organization === env.LINKEDIN_ORGANIZATION_URN && env.LINKEDIN_ORGANIZATION_NAME ? env.LINKEDIN_ORGANIZATION_NAME : authorizedOrganizations.size===1 ? env.LINKEDIN_ORGANIZATION_NAME||"LinkedIn organization" : organization,
+      memberId: String(identity.sub)
+    }));
+    if (!accounts.length) throw httpError("linkedin-member-lacks-organization-publishing-role", 403);
   }
-  if (!account?.id || !account?.label) throw httpError("account-identity-missing", 502);
-  const sealed = await sealToken(JSON.stringify({ accessToken: connectionToken, refreshToken: ["linkedin", "x", "pinterest"].includes(provider) ? token.refresh_token || null : null, refreshExpiresAt: token.refresh_token_expires_in ? new Date(Date.now() + token.refresh_token_expires_in * 1000).toISOString() : null }), env); const id = randomId();
-  await db.prepare(`INSERT INTO connections(id,user_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,expires_at,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET id=excluded.id,account_id=excluded.account_id,account_label=excluded.account_label,account_json=excluded.account_json,scopes_json=excluded.scopes_json,token_ciphertext=excluded.token_ciphertext,token_iv=excluded.token_iv,expires_at=excluded.expires_at,created_at=excluded.created_at`)
-    .bind(id, record.user_id, provider, String(account.id), account.label, JSON.stringify(account), JSON.stringify(PROVIDERS[provider].scopes), sealed.data, sealed.iv, token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null, nowIso()).run();
   const owner = await db.prepare("SELECT org_id FROM users WHERE id=?").bind(record.user_id).first();
-  if (owner) await auditEvent(db,owner.org_id,record.user_id,"social.connected",provider,{accountLabel:account.label});
+  if (!owner) throw httpError("account-disabled",401);
+  const existingRows=await db.prepare("SELECT account_id FROM connections WHERE org_id=? AND provider=?").bind(owner.org_id,provider).all();
+  const existingIds=new Set((existingRows.results||[]).map((row)=>row.account_id));
+  const newIds=new Set(accounts.filter((account)=>account?.id).map((account)=>String(account.id)).filter((id)=>!existingIds.has(id)));
+  const connectionCount=await db.prepare("SELECT COUNT(*) AS count FROM connections WHERE org_id=?").bind(owner.org_id).first();
+  if((connectionCount?.count||0)+newIds.size>workspaceLimit(env,"WORKSPACE_MAX_CONNECTED_ACCOUNTS",DEFAULT_MAX_ACCOUNTS))throw httpError("connected-account-limit-reached",429);
+  const connected = [];
+  for (const account of accounts) {
+    if (!account?.id || !account?.label) continue;
+    const accessToken = account.accessToken || connectionToken;
+    const sealed = await sealToken(JSON.stringify({ accessToken, refreshToken: ["linkedin", "x", "pinterest"].includes(provider) ? token.refresh_token || null : null, refreshExpiresAt: token.refresh_token_expires_in ? new Date(Date.now() + token.refresh_token_expires_in * 1000).toISOString() : null }), env);
+    const id = await saveConnection(db,{id:record.user_id,org_id:owner.org_id},provider,account,sealed,token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null,env);
+    connected.push(id);
+    await auditEvent(db,owner.org_id,record.user_id,"social.connected",provider,{accountLabel:account.label});
+  }
+  if (!connected.length) throw httpError("account-identity-missing",502);
   return provider;
 }
-async function getConnection(db, userId, provider) {
-  const row = await db.prepare("SELECT c.* FROM connections c JOIN users owner ON owner.id=c.user_id JOIN users requester ON requester.org_id=owner.org_id WHERE requester.id=? AND c.provider=? ORDER BY c.created_at DESC LIMIT 1").bind(userId, provider).first();
+async function saveConnection(db,user,provider,account,sealed,expiresAt,env) {
+  const existing=await db.prepare("SELECT id FROM connections WHERE org_id=? AND provider=? AND account_id=?").bind(user.org_id,provider,String(account.id)).first();
+  if (!existing) {
+    const count=await db.prepare("SELECT COUNT(*) AS count FROM connections WHERE org_id=?").bind(user.org_id).first();
+    if (count?.count>=workspaceLimit(env,"WORKSPACE_MAX_CONNECTED_ACCOUNTS",DEFAULT_MAX_ACCOUNTS)) throw httpError("connected-account-limit-reached",429);
+  }
+  const id=existing?.id||randomId();
+  await db.prepare(`INSERT INTO connections(id,user_id,org_id,provider,account_id,account_label,account_json,scopes_json,token_ciphertext,token_iv,expires_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(org_id,provider,account_id) DO UPDATE SET user_id=excluded.user_id,account_label=excluded.account_label,account_json=excluded.account_json,scopes_json=excluded.scopes_json,token_ciphertext=excluded.token_ciphertext,token_iv=excluded.token_iv,expires_at=excluded.expires_at,created_at=excluded.created_at`)
+    .bind(id,user.id,user.org_id,provider,String(account.id),account.label,JSON.stringify(Object.fromEntries(Object.entries(account).filter(([key])=>key!=="accessToken"))),JSON.stringify(PROVIDERS[provider].scopes),sealed.data,sealed.iv,expiresAt,nowIso()).run();
+  return id;
+}
+async function getConnection(db, userId, provider, connectionId = null) {
+  const rows = await db.prepare("SELECT c.* FROM connections c JOIN users requester ON requester.org_id=c.org_id WHERE requester.id=? AND c.provider=? AND (? IS NULL OR c.id=?) ORDER BY c.created_at DESC LIMIT 2").bind(userId, provider,connectionId,connectionId).all();
+  if (!connectionId && rows.results?.length > 1) return {ambiguous:true};
+  const row=rows.results?.[0]||null;
   if (row) row.account = JSON.parse(row.account_json || "{}");
   return row;
 }
@@ -655,7 +711,8 @@ async function accountPublish(request, user, env, db) {
   const body = await readJson(request); const text = String(body.text || "").trim();
   const targets = requestedTargets(body.targets);
   if (!text) throw httpError("empty-text"); if (!targets.length) throw httpError("no-targets");
-  for (const provider of targets) {
+  for (const target of targets) {
+    const provider=target.provider;
     validateTextLength(provider, text);
     if (["instagram", "pinterest"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`);
     if (provider === "x" && body.mediaId) {
@@ -666,14 +723,17 @@ async function accountPublish(request, user, env, db) {
   }
   const idem = String(request.headers.get("Idempotency-Key") || "").slice(0, 128) || null;
   const draftId = String(body.draftId || "").trim() || null;
-  const fingerprint = idem ? await requestFingerprint(user.id, "publish", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, draftId }) : null;
+  const fingerprintTargets = Array.isArray(body.targets) && body.targets.every((target) => typeof target === "string")
+    ? [...new Set(body.targets)].sort()
+    : sortTargets(targets);
+  const fingerprint = idem ? await requestFingerprint(user.id, "publish", { text, targets: fingerprintTargets, mediaId: body.mediaId || null, draftId }) : null;
   if (idem) {
     const prior = await db.prepare("SELECT id,results_json,request_fingerprint FROM posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first();
     if (prior) {
       if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409);
       let priorResults = JSON.parse(prior.results_json || "[]");
       if (!priorResults.length) {
-        priorResults = targets.map((provider) => ({ provider, status: "action-required", message: "prior-attempt-status-unknown-check-network-before-retry" }));
+        priorResults = targets.map((target) => ({ provider:target.provider, connectionId:target.connectionId, status: "action-required", message: "prior-attempt-status-unknown-check-network-before-retry" }));
         await db.prepare("UPDATE posts SET results_json=? WHERE id=? AND results_json='[]'").bind(JSON.stringify(priorResults), prior.id).run();
       }
       return { results: priorResults, postId: prior.id, deduped: true };
@@ -696,9 +756,11 @@ async function accountPublish(request, user, env, db) {
     try { await db.prepare("INSERT INTO posts(id,user_id,idempotency_key,text,media_id,results_json,created_at,request_fingerprint,usage_period,campaign_draft_id) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,"[]",nowIso(),fingerprint,usagePeriod,approvedDraft?.id||null).run(); }
     catch { await releaseMonthlyPublication(db,user.org_id,usagePeriod); if(approvedDraft)await releaseApprovedDraft(db,user.org_id,approvedDraft.id,"publishing"); const prior = await db.prepare("SELECT id,results_json,request_fingerprint FROM posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); const priorResults=JSON.parse(prior.results_json||"[]"); return {results:priorResults.length?priorResults:targets.map((provider)=>({provider,status:"action-required",message:"prior-attempt-status-unknown-check-network-before-retry"})),postId:prior.id,deduped:true}; } throw httpError("publish-idempotency-conflict", 409); }
   }
-  const results = await Promise.all(targets.map(async (provider) => {
-    const connection = await getConnection(db, user.id, provider);
-    return connection ? publishOne(provider, connection, text, media, env) : { provider, status: "action-required", message: "not-connected" };
+  const results = await Promise.all(targets.map(async (target) => {
+    const connection = await getConnection(db, user.id, target.provider, target.connectionId);
+    const result=connection?.ambiguous ? {provider:target.provider,status:"action-required",message:"target-account-selection-required"}
+      : connection ? await publishOne(target.provider, connection, text, media, env) : { provider:target.provider, status: "action-required", message: "not-connected" };
+    return {...result,connectionId:connection?.id||target.connectionId||null,accountLabel:connection?.account_label||null};
   }));
   if (idem) await db.prepare("UPDATE posts SET results_json=? WHERE id=?").bind(JSON.stringify(results), id).run();
   else {
@@ -714,7 +776,7 @@ async function createSchedule(request, user, env, db) {
   if (!text || !targets.length || !body.runAtUTC || !Number.isFinite(runAt.getTime()) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(body.runAtUTC) || runAt.getTime() < Date.now() + 60000) throw httpError("text-targets-future-runAtUTC-required");
   const timezone = String(body.timezone || "UTC").trim();
   try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(runAt); } catch { throw httpError("invalid-time-zone"); }
-  for (const provider of targets) { validateTextLength(provider, text); if (["instagram", "pinterest"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`); }
+  for (const target of targets) { const provider=target.provider; validateTextLength(provider, text); if (["instagram", "pinterest"].includes(provider) && !body.mediaId) throw httpError(`media-required:${provider}`); }
   if (body.mediaId) {
     const media = await getMedia(db, body.mediaId, user.id);
     if (!media) throw httpError("media-not-found", 404);
@@ -723,7 +785,10 @@ async function createSchedule(request, user, env, db) {
   }
   const idem = String(request.headers.get("Idempotency-Key") || "").slice(0, 128) || null;
   const draftId = String(body.draftId || "").trim() || null;
-  const fingerprint = idem ? await requestFingerprint(user.id, "schedule", { text, targets: [...targets].sort(), mediaId: body.mediaId || null, runAtUTC: runAt.toISOString(), timezone, draftId }) : null;
+  const fingerprintTargets = Array.isArray(body.targets) && body.targets.every((target) => typeof target === "string")
+    ? [...new Set(body.targets)].sort()
+    : sortTargets(targets);
+  const fingerprint = idem ? await requestFingerprint(user.id, "schedule", { text, targets: fingerprintTargets, mediaId: body.mediaId || null, runAtUTC: runAt.toISOString(), timezone, draftId }) : null;
   if (idem) { const prior = await db.prepare("SELECT * FROM scheduled_posts WHERE user_id=? AND idempotency_key=?").bind(user.id, idem).first(); if (prior) { if (prior.request_fingerprint && prior.request_fingerprint !== fingerprint) throw httpError("idempotency-key-reused-with-different-request", 409); return { job: await scheduleView(db, prior), deduped: true }; } }
   const approvedDraft = await requireApprovedDraft(db,user,env,draftId,text,targets,body.mediaId || null);
   if (approvedDraft) await claimApprovedDraft(db,user,approvedDraft.id,"scheduled");
@@ -732,7 +797,7 @@ async function createSchedule(request, user, env, db) {
     usagePeriod=await reserveMonthlyPublication(db,user,env);
     const id = randomId(); const created = nowIso();
     const statements = [db.prepare("INSERT INTO scheduled_posts(id,user_id,idempotency_key,text,media_id,targets_json,status,run_at,created_at,request_fingerprint,usage_period,timezone,campaign_draft_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,user.id,idem,text,body.mediaId || null,JSON.stringify(targets),"queued",runAt.toISOString(),created,fingerprint,usagePeriod,timezone,approvedDraft?.id||null)];
-    for (const provider of targets) statements.push(db.prepare("INSERT INTO scheduled_results(job_id,provider,status,attempts,next_run_at) VALUES(?,?,?,?,?)").bind(id,provider,"queued",0,runAt.toISOString()));
+    for (const target of targets) statements.push(db.prepare("INSERT INTO scheduled_results(job_id,target_key,provider,connection_id,status,attempts,next_run_at) VALUES(?,?,?,?,?,?,?)").bind(id,targetKey(target),target.provider,target.connectionId,"queued",0,runAt.toISOString()));
     await db.batch(statements);
     return { job: { id, runAtUTC: runAt.toISOString(), timezone, status: "queued", targets }, deduped: false };
   } catch (error) {
@@ -751,8 +816,8 @@ async function requireApprovedDraft(db,user,env,draftId,text,targets,mediaId) {
   const draft=await db.prepare("SELECT id,text,targets_json,media_id,review_status,publication_state FROM campaign_drafts WHERE id=? AND org_id=?").bind(draftId,user.org_id).first();
   if (!draft) throw httpError("approved-campaign-draft-not-found",404);
   if (draft.review_status !== "approved" || draft.publication_state !== "not_published") throw httpError("approved-campaign-draft-not-ready",409);
-  const approvedTargets=JSON.parse(draft.targets_json||"[]").sort();
-  if (draft.text !== text || JSON.stringify(approvedTargets) !== JSON.stringify([...targets].sort()) || (draft.media_id||null) !== (mediaId||null)) throw httpError("approved-campaign-content-mismatch",409);
+  const approvedTargets=requestedTargets(JSON.parse(draft.targets_json||"[]"));
+  if (draft.text !== text || JSON.stringify(sortTargets(approvedTargets)) !== JSON.stringify(sortTargets(targets)) || (draft.media_id||null) !== (mediaId||null)) throw httpError("approved-campaign-content-mismatch",409);
   return draft;
 }
 async function claimApprovedDraft(db,user,draftId,state) {
@@ -766,18 +831,18 @@ async function finishApprovedDraft(db,orgId,draftId,state) {
   await db.prepare("UPDATE campaign_drafts SET publication_state=?,review_status=CASE WHEN ?='needs_action' THEN 'draft' ELSE review_status END WHERE id=? AND org_id=? AND publication_state='publishing'").bind(state,state,draftId,orgId).run();
 }
 async function scheduleView(db, row) {
-  const result = await db.prepare("SELECT provider,status,attempts,result_json FROM scheduled_results WHERE job_id=? ORDER BY provider").bind(row.id).all();
+  const result = await db.prepare("SELECT provider,connection_id,status,attempts,result_json FROM scheduled_results WHERE job_id=? ORDER BY provider,target_key").bind(row.id).all();
   return { id: row.id, authorId: row.user_id, text: row.text, mediaId: row.media_id, campaignDraftId:row.campaign_draft_id||null, targets: JSON.parse(row.targets_json), status: row.status, runAtUTC: row.run_at, timezone: row.timezone || "UTC", createdAt: row.created_at, results: (result.results || []).filter((r) => r.result_json).map((r) => JSON.parse(r.result_json)) };
 }
 async function processDue(env, db) {
   const now = nowIso();
   const expiredLeases = await db.prepare("SELECT id,user_id,campaign_draft_id FROM scheduled_posts WHERE status='processing' AND lease_until<?").bind(now).all();
   for (const job of expiredLeases.results || []) {
-    const pending = await db.prepare("SELECT provider FROM scheduled_results WHERE job_id=? AND status='queued'").bind(job.id).all();
+    const pending = await db.prepare("SELECT target_key,provider,connection_id FROM scheduled_results WHERE job_id=? AND status='queued'").bind(job.id).all();
     for (const target of pending.results || []) {
-      const result = { provider: target.provider, status: "action-required", message: "worker-lease-expired-outcome-unknown" };
-      await db.prepare("UPDATE scheduled_results SET status='action-required',next_run_at=?,result_json=? WHERE job_id=? AND provider=? AND status='queued'")
-        .bind(now, JSON.stringify(result), job.id, target.provider).run();
+      const result = { provider: target.provider,connectionId:target.connection_id||null,status: "action-required", message: "worker-lease-expired-outcome-unknown" };
+      await db.prepare("UPDATE scheduled_results SET status='action-required',next_run_at=?,result_json=? WHERE job_id=? AND target_key=? AND status='queued'")
+        .bind(now, JSON.stringify(result), job.id, target.target_key).run();
     }
     const summary = await db.prepare("SELECT status,COUNT(*) AS count FROM scheduled_results WHERE job_id=? GROUP BY status").bind(job.id).all();
     const states = summary.results || [];
@@ -792,22 +857,27 @@ async function processDue(env, db) {
   const claimed = await db.prepare(`UPDATE scheduled_posts SET status='processing',lease_until=? WHERE id IN (SELECT id FROM scheduled_posts WHERE status='queued' AND run_at<=? ORDER BY run_at LIMIT 10) AND status='queued' RETURNING *`).bind(new Date(Date.now() + 10 * 60000).toISOString(), now).all();
   for (const job of claimed.results || []) {
     const targets = JSON.parse(job.targets_json);
-    await Promise.all(targets.map(async (provider) => {
-      const target = await db.prepare("SELECT * FROM scheduled_results WHERE job_id=? AND provider=?").bind(job.id, provider).first();
+    await Promise.all(targets.map(async (targetInput) => {
+      const targetSpec=typeof targetInput==="string"?{provider:targetInput,connectionId:null}:targetInput;
+      const provider=targetSpec.provider;
+      const key=targetKey(targetSpec);
+      const target = await db.prepare("SELECT * FROM scheduled_results WHERE job_id=? AND target_key=?").bind(job.id,key).first();
       if (!target || target.status === "published" || target.status === "action-required" || target.status === "failed" || target.next_run_at > nowIso()) return;
-      const connection = await getConnection(db, job.user_id, provider);
+      const connection = await getConnection(db, job.user_id, provider,targetSpec.connectionId);
       let result;
-      if (!connection) result = { provider, status: "action-required", message: "not-connected" };
+      if (connection?.ambiguous) result = {provider,connectionId:null,status:"action-required",message:"target-account-selection-required"};
+      else if (!connection) result = { provider,connectionId:targetSpec.connectionId||null,status: "action-required", message: "not-connected" };
       else {
         const row = job.media_id ? await getMedia(db, job.media_id, job.user_id) : null;
         const media = row ? await loadMedia(row, env) : null;
         if (job.media_id && !media) result = { provider, status: "action-required", message: "scheduled-media-missing" };
         else result = await publishOne(provider, connection, job.text, media, env);
+        result={...result,connectionId:connection.id,accountLabel:connection.account_label};
       }
       const attempts = target.attempts + 1;
       const retry = result.status === "failed" && result.retryable && attempts < 5;
       const next = retry ? new Date(Date.now() + [120000,600000,1800000,7200000][Math.min(attempts - 1, 3)]).toISOString() : nowIso();
-      await db.prepare("UPDATE scheduled_results SET status=?,attempts=?,next_run_at=?,result_json=? WHERE job_id=? AND provider=? AND status='queued'").bind(retry ? "queued" : result.status, attempts, next, JSON.stringify(result), job.id, provider).run();
+      await db.prepare("UPDATE scheduled_results SET status=?,attempts=?,next_run_at=?,result_json=? WHERE job_id=? AND target_key=? AND status='queued'").bind(retry ? "queued" : result.status, attempts, next, JSON.stringify(result), job.id, key).run();
     }));
     const summary = await db.prepare("SELECT status,COUNT(*) AS count,MIN(CASE WHEN status='queued' THEN next_run_at END) AS next_run FROM scheduled_results WHERE job_id=? GROUP BY status").bind(job.id).all();
     const states = summary.results || [];
@@ -839,15 +909,15 @@ async function processDue(env, db) {
 
 function campaignDraftView(row) {
   return { id:row.id, authorId:row.author_user_id, updatedById:row.updated_by_user_id, title:row.title, text:row.text, mediaId:row.media_id,
-    targets:JSON.parse(row.targets_json), countryCode:row.country_code, languageTag:row.language_tag, timezone:row.timezone,
+    targets:row.targets_json?requestedTargets(JSON.parse(row.targets_json)):[], countryCode:row.country_code, languageTag:row.language_tag, timezone:row.timezone,
     reviewStatus:row.review_status, reviewNote:row.review_note, publicationState:row.publication_state||"not_published", createdAt:row.created_at, updatedAt:row.updated_at };
 }
 function campaignDraftInput(body) {
   const title=String(body.title||"").trim(); const text=String(body.text||"").trim();
   if (!text || text.length>2200) throw httpError("invalid-draft-text");
   if (title.length>160) throw httpError("invalid-draft-title");
-  const targets=body.targets===undefined?[]:body.targets;
-  if (!Array.isArray(targets) || targets.length>9 || targets.some((provider)=>typeof provider!=="string"||!PROVIDERS[provider])) throw httpError("unsupported-target");
+  const targets=body.targets===undefined||!body.targets.length?[]:requestedTargets(body.targets);
+  if (targets.length>DEFAULT_MAX_ACCOUNTS) throw httpError("too-many-target-accounts");
   const countryCode=String(body.countryCode||"").trim().toUpperCase();
   if (countryCode) {
     const displayName=/^[A-Z]{2}$/.test(countryCode)&&!NON_ISO_REGION_CODES.has(countryCode)
@@ -862,7 +932,7 @@ function campaignDraftInput(body) {
   if (timezone) { try { new Intl.DateTimeFormat("en",{timeZone:timezone}); } catch { throw httpError("invalid-time-zone"); } }
   const mediaId=body.mediaId?String(body.mediaId):null;
   if(mediaId && mediaId.length>128) throw httpError("invalid-media-id");
-  return {title:title||text.slice(0,80),text,targets:[...new Set(targets)],countryCode,languageTag:canonicalLanguageTag,timezone,mediaId};
+  return {title:title||text.slice(0,80),text,targets,countryCode,languageTag:canonicalLanguageTag,timezone,mediaId};
 }
 
 async function handle(request, env, ctx) {
@@ -1040,11 +1110,12 @@ async function handle(request, env, ctx) {
   }
   if (url.pathname === "/api/me" && request.method === "GET") return json({ user:userMetadata(await authenticate(request,env,env.DB)) },200,secureHeaders(cors));
   if (url.pathname === "/api/connections" && request.method === "GET") {
-    const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT c.provider,c.account_id,c.account_label,c.account_json,c.scopes_json,c.expires_at,c.created_at FROM connections c JOIN users owner ON owner.id=c.user_id WHERE owner.org_id=? ORDER BY c.provider,c.created_at DESC").bind(user.org_id).all();
-    return json((rows.results||[]).map((r)=>({provider:r.provider,account:{...JSON.parse(r.account_json),id:r.account_id,label:r.account_label},scopes:JSON.parse(r.scopes_json),expiresAt:r.expires_at,createdAt:r.created_at})),200,secureHeaders(cors));
+    const user=await authenticate(request,env,env.DB); const rows=await env.DB.prepare("SELECT c.id,c.provider,c.account_id,c.account_label,c.account_json,c.scopes_json,c.expires_at,c.created_at FROM connections c WHERE c.org_id=? ORDER BY c.provider,c.account_label").bind(user.org_id).all();
+    return json((rows.results||[]).map((r)=>({id:r.id,provider:r.provider,account:{...JSON.parse(r.account_json),id:r.account_id,label:r.account_label},scopes:JSON.parse(r.scopes_json),expiresAt:r.expires_at,createdAt:r.created_at})),200,secureHeaders(cors));
   }
   if (url.pathname === "/api/pinterest/boards" && request.method === "GET") {
-    const user=await authenticate(request,env,env.DB); const connection=await getConnection(env.DB,user.id,"pinterest");
+    const user=await authenticate(request,env,env.DB); const connection=await getConnection(env.DB,user.id,"pinterest",url.searchParams.get("connectionId"));
+    if(connection?.ambiguous) throw httpError("target-account-selection-required",409);
     if(!connection) throw httpError("pinterest-not-connected",404);
     const access=await currentAccessToken("pinterest",connection,env); const boardsUrl=new URL("https://api.pinterest.com/v5/boards"); boardsUrl.searchParams.set("page_size","250");
     const bookmark=url.searchParams.get("bookmark"); if(bookmark) boardsUrl.searchParams.set("bookmark",bookmark);
@@ -1054,7 +1125,7 @@ async function handle(request, env, ctx) {
   if (url.pathname === "/api/pinterest/board" && request.method === "POST") {
     const user=await authenticate(request,env,env.DB,["admin"]); const body=await readJson(request); const boardId=String(body.boardId||"").trim();
     if(!boardId||boardId.length>128) throw httpError("invalid-pinterest-board");
-    const connection=await getConnection(env.DB,user.id,"pinterest"); if(!connection) throw httpError("pinterest-not-connected",404);
+    const connection=await getConnection(env.DB,user.id,"pinterest",String(body.connectionId||"")||null); if(connection?.ambiguous) throw httpError("target-account-selection-required",409); if(!connection) throw httpError("pinterest-not-connected",404);
     const access=await currentAccessToken("pinterest",connection,env); const board=await graphJson(`https://api.pinterest.com/v5/boards/${encodeURIComponent(boardId)}`,access);
     if(String(board.id||"")!==boardId || (board.owner?.username && connection.account?.username && board.owner.username!==connection.account.username)) throw httpError("pinterest-board-not-owned",403);
     const account={...connection.account,boardId,boardName:String(board.name||"")};
@@ -1138,11 +1209,16 @@ async function handle(request, env, ctx) {
     return json({id,status:"canceled"},200,secureHeaders(cors));
   }
   if (url.pathname.startsWith("/api/connections/") && request.method === "DELETE") {
-    const user=await authenticate(request,env,env.DB,["admin"]); const provider=decodeURIComponent(url.pathname.split("/").at(-1));
-    if (provider === "bluesky") await env.DB.prepare("DELETE FROM atproto_oauth_sessions WHERE did IN (SELECT account_id FROM connections WHERE provider='bluesky' AND user_id IN (SELECT id FROM users WHERE org_id=?))").bind(user.org_id).run();
-    const result=await env.DB.prepare("DELETE FROM connections WHERE provider=? AND user_id IN (SELECT id FROM users WHERE org_id=?)").bind(provider,user.org_id).run(); if (!result.meta?.changes) throw httpError("not-found",404);
-    await auditEvent(env.DB,user.org_id,user.id,"social.disconnected",provider);
-    return json({ok:true,providerAuthorizationMustBeRevoked:true},200,secureHeaders(cors));
+    const user=await authenticate(request,env,env.DB,["admin"]); const idOrProvider=decodeURIComponent(url.pathname.split("/").at(-1));
+    const exact=await env.DB.prepare("SELECT id,user_id,provider,account_id,account_label FROM connections WHERE id=? AND org_id=?").bind(idOrProvider,user.org_id).first();
+    if(exact?.provider==="bluesky") await env.DB.prepare("DELETE FROM atproto_oauth_sessions WHERE did=? AND user_id=?").bind(exact.account_id,exact.user_id).run();
+    const result=exact
+      ? await env.DB.prepare("DELETE FROM connections WHERE id=? AND org_id=?").bind(exact.id,user.org_id).run()
+      : await env.DB.prepare("DELETE FROM connections WHERE provider=? AND org_id=?").bind(idOrProvider,user.org_id).run();
+    if (!result.meta?.changes) throw httpError("not-found",404);
+    const removedProvider=exact?.provider||idOrProvider;
+    await auditEvent(env.DB,user.org_id,user.id,"social.disconnected",exact?.id||removedProvider,{provider:removedProvider,accountLabel:exact?.account_label||null});
+    return json({ok:true,provider:removedProvider,connectionId:exact?.id||null,providerAuthorizationMustBeRevoked:true},200,secureHeaders(cors));
   }
   if (url.pathname === "/api/account" && request.method === "DELETE") {
     await authenticate(request,env,env.DB);

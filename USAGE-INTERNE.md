@@ -10,6 +10,7 @@
 - Les connexions sociales, publications, médias et programmations sont partagés dans l’espace Klirline. Seul l’administrateur gère les connexions OAuth et les membres. Un rédacteur peut publier et programmer; un lecteur peut consulter.
 - Désactiver un membre révoque ses sessions sans supprimer les campagnes qu’il a créées. Pour le réactiver, l’administrateur utilise le contrôle Réactiver; l’ancien mot de passe reste le sien et une nouvelle connexion est nécessaire.
 - Ne collectez jamais les mots de passe des réseaux sociaux. Utilisez les autorisations OAuth officielles et retirez l’accès des personnes qui quittent l’équipe.
+- Plusieurs comptes peuvent être connectés sur un même réseau. Facebook et LinkedIn ajoutent chaque Page/organisation accessible par le titulaire OAuth; pour Instagram, Threads, X, Pinterest et Bluesky, autorisez chaque compte séparément. N’approuvez et ne programmez que les comptes correspondant au marché visé.
 - Gardez séparés l’environnement de test et les comptes sociaux réels. Protégez les secrets, limitez les administrateurs et vérifiez les journaux de déploiement.
 - Consultez le journal d’activité dans Préférences après les invitations, changements d’accès, connexions sociales, publications et programmations; il conserve les 100 événements les plus récents sans enregistrer le texte des publications.
 
@@ -21,7 +22,7 @@ Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 pub
 
 ## Processus de campagne multi-pays
 
-1. Confirmer le pays, le public visé, la langue et le service promu.
+1. Confirmer le pays, le public visé, la langue, le service promu et le compte officiel choisi pour ce marché.
 2. Faire relire le texte traduit par une personne compétente; vérifier les promesses de service, prix, conditions et exigences locales avant publication.
 3. Adapter le format au réseau et au pays; sélectionner uniquement les comptes officiels autorisés.
 4. Enregistrer chaque campagne dans les brouillons partagés et faire approuver le contenu exact par un administrateur avant diffusion. En mode interne, le Worker bloque toujours les publications API et programmations qui ne référencent pas un brouillon approuvé dont le texte, les destinations et le média correspondent exactement, même si la variable `REQUIRE_APPROVED_DRAFTS` est mal configurée. Toute modification du contenu exige une nouvelle approbation.
@@ -38,7 +39,7 @@ Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 pub
 
 ## Écarts à traiter avant un usage régulier par toute l’équipe
 
-- Appliquer toutes les migrations jusqu’à 0014 avant d’utiliser les brouillons partagés, les métadonnées de campagne, les sessions OAuth Bluesky et les textes alternatifs. Vérifier `/api/health` après migration.
+- Appliquer toutes les migrations jusqu’à 0015 avant d’utiliser les brouillons partagés, les métadonnées de campagne, les sessions OAuth Bluesky, les textes alternatifs et plusieurs comptes par réseau. Vérifier `/api/health` après migration.
 - Les brouillons partagés prennent en charge un pays, une langue, une destination et un fuseau horaire par variante; créer une variante distincte pour chaque adaptation pays/langue.
 - Garder `REQUIRE_APPROVED_DRAFTS=true`; en mode interne, le Worker impose aussi cette barrière indépendamment de cette variable. Vérifier `/api/health` après chaque déploiement.
 - Valider les accès et publier de vrais essais contrôlés sur chaque réseau que Klirline prévoit d’utiliser; les liens de profil seuls ne donnent aucun droit de publication.

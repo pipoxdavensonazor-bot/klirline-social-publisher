@@ -27,6 +27,35 @@ assert.equal(rejectedMissingDstTime, true, "nonexistent DST wall times must be r
 assert.equal(wallClockToUTC("2026-11-01T01:30", "America/Toronto").toISOString(), "2026-11-01T05:30:00.000Z", "repeated fall-back wall times use their first occurrence");
 console.log("Campaign timezone and daylight-saving checks: PASS");
 
+const targetingSource = inlineScripts[0].match(/function targetNetwork\(target\)\{[\s\S]*?(?=function refreshProfiles\()/)?.[0];
+if (!targetingSource) throw new Error("Regional account selection helpers not found in index.html");
+const targetingContext = {
+  networks: ["Facebook", "Instagram"],
+  networkFor: { facebook: "Facebook", instagram: "Instagram" },
+  providerFor: { Facebook: "facebook", Instagram: "instagram" },
+  profiles: {},
+  selected: ["acct:fb-fr"],
+  apiUser: { role: "admin" },
+  apiConnections: [
+    { id: "fb-ca", provider: "facebook", account: { label: "Klirline Canada" } },
+    { id: "fb-fr", provider: "facebook", account: { label: "Klirline France" } },
+  ],
+  isReadyConnection: () => true,
+};
+new vm.Script(`${targetingSource}; globalThis.targeting={targetNetwork,normalizeSelectedTargets,activeTargets,providerTarget};`).runInNewContext(targetingContext);
+const targeting = targetingContext.targeting;
+assert.equal(targeting.targetNetwork({ provider: "facebook", connectionId: "fb-fr" }), "Facebook");
+assert.deepEqual(Array.from(targeting.activeTargets()), ["Facebook"]);
+assert.equal(JSON.stringify(targeting.providerTarget(targeting.activeTargets())), JSON.stringify([{ provider: "facebook", connectionId: "fb-fr" }]));
+targetingContext.selected = ["Facebook"];
+assert.equal(JSON.stringify(targeting.providerTarget(targeting.activeTargets())), JSON.stringify([
+  { provider: "facebook", connectionId: "fb-ca" },
+  { provider: "facebook", connectionId: "fb-fr" },
+]));
+targetingContext.selected = ["acct:unknown"];
+assert.deepEqual(Array.from(targeting.normalizeSelectedTargets(targetingContext.selected)), []);
+console.log("Regional account targeting selection checks: PASS");
+
 const xTextBundle = readFileSync(new URL("../vendor/klirline-x-text-3.1.0.js", import.meta.url), "utf8");
 const xTextContext = {};
 vm.runInNewContext(xTextBundle, xTextContext, { filename: "vendor/klirline-x-text-3.1.0.js" });

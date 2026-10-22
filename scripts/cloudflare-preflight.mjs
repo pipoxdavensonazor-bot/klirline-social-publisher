@@ -25,7 +25,7 @@ for (const name of ["FRONTEND_ORIGIN", "PUBLIC_BASE_URL"]) {
     if (url.hostname.includes("example") || url.hostname === "app.klirline.com" || url.hostname === "api.klirline.com") warn(`${name} utilise encore le domaine d'exemple; remplacer par le domaine réellement configuré.`);
   } catch { fail(`${name} doit contenir une URL HTTPS valide.`); }
 }
-for (const name of ["META_APP_ID", "LINKEDIN_CLIENT_ID", "THREADS_APP_ID", "X_CLIENT_ID", "PINTEREST_APP_ID", "FACEBOOK_PAGE_ID", "LINKEDIN_ORGANIZATION_URN"]) {
+for (const name of ["META_APP_ID", "LINKEDIN_CLIENT_ID", "THREADS_APP_ID", "X_CLIENT_ID", "PINTEREST_APP_ID"]) {
   if (!config.vars?.[name]) warn(`Configurer ${name} seulement si le parcours correspondant est inclus au lancement.`);
 }
 for (const secret of ["SESSION_SECRET", "BOOTSTRAP_ADMIN_KEY", "TOKENS_ENCRYPTION_KEY_HEX", "META_APP_SECRET", "LINKEDIN_CLIENT_SECRET", "THREADS_APP_SECRET", "X_CLIENT_SECRET", "PINTEREST_APP_SECRET"]) {
@@ -37,7 +37,7 @@ else {
   const numbers = new Set(migrations.map((name) => Number(name.slice(0, 4))));
   const missing = Array.from({ length: latestRequiredMigration }, (_, index) => index + 1).filter((number) => !numbers.has(number));
   if (missing.length) fail(`Migrations manquantes avant la mise en service: ${missing.map((number) => String(number).padStart(4, "0")).join(", ")}.`);
-  if (!numbers.has(13) || !numbers.has(14)) fail("Bluesky requiert les migrations 0013 (sessions OAuth) et 0014 (texte alternatif des médias).");
+  if (!numbers.has(13) || !numbers.has(14) || !numbers.has(15)) fail("Les parcours actuels requièrent les migrations 0013 (sessions OAuth Bluesky), 0014 (texte alternatif) et 0015 (comptes régionaux multiples).");
 }
 console.log("Canaux automatiques du Worker: Instagram, Page Facebook, Page LinkedIn, Threads, X, Pinterest et Bluesky.");
 console.log("Canaux manuels: TikTok (pas de Direct Post pour cet outil interne) et Twitch (pas de post promotionnel générique).");

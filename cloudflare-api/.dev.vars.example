@@ -9,7 +9,6 @@ META_APP_SECRET=
 META_GRAPH_VERSION=v26.0
 INSTAGRAM_REDIRECT_URI=http://localhost:8787/oauth/instagram/callback
 FACEBOOK_REDIRECT_URI=http://localhost:8787/oauth/facebook/callback
-FACEBOOK_PAGE_ID=
 LINKEDIN_CLIENT_ID=
 LINKEDIN_CLIENT_SECRET=
 LINKEDIN_REDIRECT_URI=http://localhost:8787/oauth/linkedin/callback
