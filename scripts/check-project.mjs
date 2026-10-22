@@ -78,6 +78,7 @@ assert.deepEqual(frontendOrigins, apiWorker.vars.FRONTEND_ORIGIN.split(",").map(
 if (!applicationSource.includes("Cette preview temporaire de build n’est pas autorisée à appeler l’API") || !applicationSource.includes("preview stable de la branche")) {
   throw new Error("Un build preview non autorisé doit link to the stable API-enabled branch preview.");
 }
+if (!applicationSource.includes("API accessible · connexion requise")) throw new Error("The app header must distinguish a reachable API from an unconnected user session.");
 const previewOriginHelper = applicationSource.match(/function isTemporaryPreviewOrigin\(hostname,origin\)\{[^}]*\}/);
 if (!previewOriginHelper) throw new Error("Temporary preview origin detection is missing.");
 const previewOriginContext = { API_ALLOWED_FRONTEND_ORIGINS: frontendOrigins };
