@@ -10,6 +10,7 @@ const inlineScripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*
 
 if (inlineScripts.length === 0) throw new Error("No inline application script found in index.html");
 inlineScripts.forEach((source, index) => new vm.Script(source, { filename: `index.html:inline-script-${index + 1}` }));
+if (!html.includes("Brouillons (${sharedDrafts.length+drafts.length})")) throw new Error("The drafts section count must include shared and local drafts.");
 
 const timezoneSource = inlineScripts[0].match(/function calendarDayKey\(date\)[\s\S]*?(?=function populateTimeZones\()/)?.[0];
 if (!timezoneSource) throw new Error("Campaign timezone helpers not found in index.html");
