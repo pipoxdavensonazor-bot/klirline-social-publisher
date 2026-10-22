@@ -174,7 +174,7 @@ Prêt à passer à la prochaine étape ? Écrivez-nous dès aujourd’hui.</text
   function heading(title,description,actions=''){return `<div class="page-heading"><div><h1>${esc(title)}</h1><p>${esc(description)}</p></div><div class="page-actions">${actions}</div></div>`}
   function empty(message){return `<div class="empty-state">${esc(message)}</div>`}
   function renderSection(name){
-    $('.nav [data-nav]').forEach(b=>{const active=b.dataset.nav===name;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});$('#current-section').textContent=name;$('#compose-view').hidden=name!=='Créer une publication';const host=$('#section-view');host.hidden=name==='Créer une publication';if(name==='Créer une publication'){window.scrollTo({top:0,behavior:'smooth'});return}
+    $$('.nav [data-nav]').forEach(b=>{const active=b.dataset.nav===name;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});$('#current-section').textContent=name;$('#compose-view').hidden=name!=='Créer une publication';const host=$('#section-view');host.hidden=name==='Créer une publication';if(name==='Créer une publication'){window.scrollTo({top:0,behavior:'smooth'});return}
     if(name==='Calendrier'){host.innerHTML=calendarMarkup();bindCalendar();return}
     if(name==='Publications'){host.innerHTML=postsMarkup();bindPosts();return}
     if(name==='Médias'){host.innerHTML=mediaMarkup();bindMedia();return}
