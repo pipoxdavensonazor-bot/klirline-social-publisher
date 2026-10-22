@@ -408,6 +408,17 @@ test("health endpoint reports missing production bindings and secrets", async ()
   assert.equal((await publicModeHealth.json()).checks.internalMode,false);
 });
 
+test("initial administrator bootstrap rejects a short key", async () => {
+  const ctx = fixture({ BOOTSTRAP_ADMIN_KEY: "short" });
+  const response = await ctx.request("/api/auth/register", "POST", {
+    email: "owner@klirline.ca",
+    password: "a-secure-password-123"
+  }, { "X-Klirline-Bootstrap": "short" });
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "bootstrap-key-not-configured");
+  assert.equal(ctx.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get().count, 0);
+});
+
 test("expired schedule leases require review instead of retrying an uncertain public send", async () => {
   const ctx = fixture();
   const cookie = await bootstrap(ctx);
