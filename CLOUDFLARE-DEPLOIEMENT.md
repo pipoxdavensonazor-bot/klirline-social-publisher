@@ -5,11 +5,11 @@ Klirline Social Publisher est un outil interne pour les campagnes de Klirline. I
 ## État vérifié — 21 octobre 2026
 
 - Le Worker frontend de production `klirline-social-publisher` n’a pas été remplacé par la branche `commercial-readiness`. La PR GitHub reste en brouillon. Le site de production continue de servir la version antérieure.
-- L’aperçu vérifié de la branche est [`https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev/`](https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev/) et protégé par Cloudflare Access. La politique Allow couvre les adresses `@klirline.ca`; l’accès doit être effectué par un membre de l’équipe. L’hôte personnalisé d’aperçu est préparé, mais ne résout pas encore dans le contrôle réseau.
+- La build de prévisualisation de `commercial-readiness` est prête dans Cloudflare. Son URL de branche est [`https://commercial-readiness.social-preview.klirline.ca/`](https://commercial-readiness.social-preview.klirline.ca/) et son URL de version est `https://5cf0d6c9.social-preview.klirline.ca/`. Cloudflare DNS répond pour cet hôte et le certificat avancé est actif; une requête automatisée reçoit cependant `403 cf-mitigated: challenge`. L’aperçu `workers.dev` de branche reste utilisable pour parcourir les écrans.
 - Le Worker API distinct `klirline-social-api` est en ligne sur `https://social-api.klirline.ca`, version `380b7f4d-e117-475b-9327-00be6119526a`. Il utilise D1 `klirline-social`, R2 `klirline-social-media` et les migrations `0001` à `0015`.
 - Le contrôle navigateur de [`/api/health`](https://social-api.klirline.ca/api/health) est `ok:true`: D1, schéma, R2, mode interne, approbation, session, chiffrement des jetons et préparation du bootstrap sont tous valides. [`/api/auth/bootstrap`](https://social-api.klirline.ca/api/auth/bootstrap) répond encore `needsAdmin:true`.
 - Les requêtes D1 de contrôle ont trouvé 0 utilisateur, 0 connexion sociale, 0 publication et 0 programmation avant l’onboarding. Aucun compte social n’a été connecté ni aucune publication réelle envoyée.
-- La configuration CORS de l’API autorise les origines frontend de production et les previews autorisées, dont `https://commercial-readiness.social-preview.klirline.ca`. L’exception anti-challenge Cloudflare est limitée aux requêtes `/api/*` de cette origine vers `social-api.klirline.ca`. Le déploiement API et l’ajout du domaine preview ne remplacent pas le Worker frontend de production.
+- La configuration CORS de l’API contient l’origine de preview `https://commercial-readiness.social-preview.klirline.ca`. L’exception anti-challenge Cloudflare est limitée aux requêtes `/api/*` des origines autorisées vers `social-api.klirline.ca`. Un contrôle HTTPS non interactif a encore obtenu `403 cf-mitigated: challenge`; valider depuis un navigateur membre Klirline avant de compter sur cette session. Le déploiement API et le domaine preview ne remplacent pas le Worker frontend de production.
 
 ## Première connexion et administrateur
 
@@ -30,7 +30,7 @@ Klirline Social Publisher est un outil interne pour les campagnes de Klirline. I
 
 5. Confirmer que l’interface indique **Connecté**, puis vérifier l’enregistrement d’un brouillon et son approbation avant tout essai de publication.
 
-La navigation de l’application et la réponse de l’API ont été vérifiées séparément. L’étape qui reste au titulaire est de se connecter à Access puis de créer le premier administrateur avec sa clé bootstrap. Aucun administrateur, compte social ou post réel n’a encore été créé. Sur `workers.dev`, le cookie de session peut être bloqué comme cookie intersite; si cela arrive, l’hôte personnalisé d’aperçu doit d’abord être rendu joignable et testé.
+La navigation de l’application a été vérifiée sur `workers.dev`; le bouton de vérification y affiche « Serveur accessible » et le formulaire du premier administrateur apparaît. Aucun administrateur, compte social ou post réel n’a encore été créé. Sur `workers.dev`, le cookie de session peut être bloqué comme cookie intersite. Ouvrir l’hôte personnalisé dans un navigateur membre Klirline, passer Cloudflare Access/le challenge si demandé, puis confirmer la session avant la création du premier administrateur.
 
 ## Réseaux et prérequis externes
 
