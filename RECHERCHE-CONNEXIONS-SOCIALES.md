@@ -105,6 +105,7 @@ Si « sans API » signifie qu’aucun appel API ni mécanisme officiel n’est u
 - Bluesky account management and OAuth : https://docs.bsky.app/blog/account-management
 - TikTok Content Posting API get started : https://developers.tiktok.com/docs/en/content-posting-api-get-started
 - TikTok Direct Post reference/audit limitations : https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post
+- TikTok Content Sharing Guidelines (les API de publication ne doivent pas servir uniquement à l’équipe privée du développeur ni aux comptes gérés par cette équipe) : https://developers.tiktok.com/docs/en/content-sharing-guidelines
 - Twitch API reference (actions réellement proposées) : https://dev.twitch.tv/docs/api/reference
 - Twitch authentication and OAuth : https://dev.twitch.tv/docs/authentication
 - Twitch create clips : https://dev.twitch.tv/docs/api/clips/
