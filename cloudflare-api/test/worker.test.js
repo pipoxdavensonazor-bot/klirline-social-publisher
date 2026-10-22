@@ -34,7 +34,7 @@ function fixture(overrides = {}) {
   };
   const env = {
     DB, MEDIA, INTERNAL_MODE: "true", SESSION_SECRET: "s".repeat(48), TOKENS_ENCRYPTION_KEY_HEX: "a".repeat(64),
-    BOOTSTRAP_ADMIN_KEY: "bootstrap-secret", FRONTEND_ORIGIN: "https://app.test", PUBLIC_BASE_URL: "https://api.test",
+    BOOTSTRAP_ADMIN_KEY: "bootstrap-secret".repeat(3), FRONTEND_ORIGIN: "https://app.test", PUBLIC_BASE_URL: "https://api.test",
     LINKEDIN_CLIENT_ID: "client", LINKEDIN_CLIENT_SECRET: "secret", LINKEDIN_REDIRECT_URI: "https://api.test/oauth/linkedin/callback",
     LINKEDIN_ORGANIZATION_URN: "urn:li:organization:98765", LINKEDIN_VERSION: "202610", ...overrides
   };
@@ -376,6 +376,16 @@ test("internal team invitations create shared workspace readers and allow access
 test("health endpoint reports missing production bindings and secrets", async () => {
   const healthy = fixture();
   assert.equal((await healthy.request("/api/health")).status, 200);
+  const missingBootstrapKey = fixture({ BOOTSTRAP_ADMIN_KEY: "short" });
+  const bootstrapHealth = await missingBootstrapKey.request("/api/health");
+  assert.equal(bootstrapHealth.status, 503);
+  assert.equal((await bootstrapHealth.json()).checks.adminBootstrapReady, false);
+  const configuredBootstrap = fixture();
+  await bootstrap(configuredBootstrap);
+  configuredBootstrap.env.BOOTSTRAP_ADMIN_KEY = "";
+  const initializedHealth = await configuredBootstrap.request("/api/health");
+  assert.equal(initializedHealth.status, 200);
+  assert.equal((await initializedHealth.json()).checks.adminBootstrapReady, true);
   const missingMigration = fixture();
   missingMigration.sqlite.exec("DROP TABLE campaign_drafts");
   const migrationResponse = await missingMigration.request("/api/health");

@@ -947,6 +947,7 @@ async function handle(request, env, ctx) {
   }
   if (url.pathname === "/api/health" && request.method === "GET") {
     let database = false; let databaseSchema = false; let mediaStorage = false;
+    let adminBootstrapReady = false;
     try { database = Boolean(await env.DB?.prepare("SELECT 1 AS ready").first()); } catch {}
     try {
       const placeholders = REQUIRED_SCHEMA_TABLES.map(() => "?").join(",");
@@ -955,6 +956,8 @@ async function handle(request, env, ctx) {
         env.DB.prepare("SELECT COUNT(*) AS count FROM pragma_table_info(?) WHERE name=?").bind(table, column).first()
       ));
       databaseSchema = schema?.count === REQUIRED_SCHEMA_TABLES.length && columns.every((result) => result?.count === 1);
+      const users = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
+      adminBootstrapReady = users?.count > 0 || (typeof env.BOOTSTRAP_ADMIN_KEY === "string" && env.BOOTSTRAP_ADMIN_KEY.length >= 32);
     } catch {}
     try { if (env.MEDIA?.head) { await env.MEDIA.head("__klirline_healthcheck__"); mediaStorage = true; } } catch {}
     const checks = {
@@ -964,7 +967,8 @@ async function handle(request, env, ctx) {
       internalMode: env.INTERNAL_MODE === "true",
       approvalGateConfigured: env.INTERNAL_MODE === "true" || env.REQUIRE_APPROVED_DRAFTS === "true",
       sessionSecret: typeof env.SESSION_SECRET === "string" && env.SESSION_SECRET.length >= 32,
-      tokenEncryptionKey: /^[0-9a-f]{64}$/i.test(String(env.TOKENS_ENCRYPTION_KEY_HEX || ""))
+      tokenEncryptionKey: /^[0-9a-f]{64}$/i.test(String(env.TOKENS_ENCRYPTION_KEY_HEX || "")),
+      adminBootstrapReady
     };
     const ok = Object.values(checks).every(Boolean);
     return json({ ok, checks, providers: LAUNCH_PROVIDERS }, ok ? 200 : 503, secureHeaders(cors));
@@ -981,7 +985,8 @@ async function handle(request, env, ctx) {
     const email=String(body.email||"").trim().toLowerCase(); const password=String(body.password||"");
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError("invalid-email"); if (password.length < 12 || password.length > 200) throw httpError("password-too-short");
     if (count?.count) { await authenticate(request, env, env.DB, ["admin"]); throw httpError("team-members-not-supported", 403); }
-    if (!env.BOOTSTRAP_ADMIN_KEY || !same(request.headers.get("X-Klirline-Bootstrap"), env.BOOTSTRAP_ADMIN_KEY)) throw httpError("invalid-bootstrap-key", 403);
+    if (typeof env.BOOTSTRAP_ADMIN_KEY !== "string" || env.BOOTSTRAP_ADMIN_KEY.length < 32) throw httpError("bootstrap-key-not-configured", 503);
+    if (!same(request.headers.get("X-Klirline-Bootstrap"), env.BOOTSTRAP_ADMIN_KEY)) throw httpError("invalid-bootstrap-key", 403);
     if (!env.SESSION_SECRET || env.SESSION_SECRET.length < 32) throw httpError("session-secret-not-configured",503);
     const id=randomId(); const salt=randomId(16); const hash=await passwordHash(password,salt);
     try { await env.DB.prepare("INSERT INTO users(id,email,password_salt,password_hash,role,org_id,created_at) SELECT ?,?,?,?,'admin','klirline',? WHERE NOT EXISTS(SELECT 1 FROM users)").bind(id,email,salt,hash,nowIso()).run(); }
