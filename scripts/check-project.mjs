@@ -78,6 +78,15 @@ assert.deepEqual(frontendOrigins, apiWorker.vars.FRONTEND_ORIGIN.split(",").map(
 if (!applicationSource.includes("Cette preview temporaire de build n’est pas autorisée à appeler l’API") || !applicationSource.includes("preview stable de la branche")) {
   throw new Error("Un build preview non autorisé doit link to the stable API-enabled branch preview.");
 }
+const previewOriginHelper = applicationSource.match(/function isTemporaryPreviewOrigin\(hostname,origin\)\{[^}]*\}/);
+if (!previewOriginHelper) throw new Error("Temporary preview origin detection is missing.");
+const previewOriginContext = { API_ALLOWED_FRONTEND_ORIGINS: frontendOrigins };
+new vm.Script(`${previewOriginHelper[0]}; globalThis.isTemporaryPreviewOrigin = isTemporaryPreviewOrigin;`).runInNewContext(previewOriginContext);
+const isTemporaryPreviewOrigin = previewOriginContext.isTemporaryPreviewOrigin;
+assert.equal(isTemporaryPreviewOrigin("commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev", "https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev"), false);
+assert.equal(isTemporaryPreviewOrigin("commercial-readiness.social-preview.klirline.ca", "https://commercial-readiness.social-preview.klirline.ca"), false);
+assert.equal(isTemporaryPreviewOrigin("0748c92c.social-preview.klirline.ca", "https://0748c92c.social-preview.klirline.ca"), true);
+assert.equal(isTemporaryPreviewOrigin("4f8e4c09-klirline-social-publisher.pipoxdavensonazor.workers.dev", "https://4f8e4c09-klirline-social-publisher.pipoxdavensonazor.workers.dev"), true);
 if (staticWorker.name !== "klirline-social-publisher") throw new Error("Static Worker name must match the Cloudflare service.");
 if (staticWorker.assets?.directory !== "./site") throw new Error("Static Worker must serve only the generated site/ directory.");
 if (!staticWorker.previews || typeof staticWorker.previews !== "object") throw new Error("Worker preview builds require a previews configuration block.");
