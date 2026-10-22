@@ -21,7 +21,7 @@
     { "binding": "MEDIA", "bucket_name": "klirline-social-media" }
   ],
   "vars": {
-    "FRONTEND_ORIGIN": "https://klirline-social-publisher.pipoxdavensonazor.workers.dev,https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev",
+    "FRONTEND_ORIGIN": "https://klirline-social-publisher.pipoxdavensonazor.workers.dev,https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev,https://commercial-readiness.social-preview.klirline.ca",
     "PUBLIC_BASE_URL": "https://social-api.klirline.ca",
     "META_GRAPH_VERSION": "v26.0",
     "THREADS_API_VERSION": "v1.0",

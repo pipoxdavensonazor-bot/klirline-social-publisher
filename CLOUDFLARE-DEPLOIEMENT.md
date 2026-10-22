@@ -2,14 +2,14 @@
 
 Klirline Social Publisher est un outil interne pour les campagnes de Klirline. Il n’est pas vendu et n’a ni abonnement ni facturation.
 
-## État vérifié — 22 octobre 2026 UTC
+## État vérifié — 21 octobre 2026
 
 - Le Worker frontend de production `klirline-social-publisher` n’a pas été remplacé par la branche `commercial-readiness`. La PR GitHub reste en brouillon. Le site de production continue de servir la version antérieure.
-- L’aperçu de la branche est protégé par Cloudflare Access. La politique Allow couvre les adresses `@klirline.ca`; l’écran de connexion par code courriel fonctionne. Il faut encore qu’un membre de l’équipe fasse cette connexion lui-même.
+- L’aperçu vérifié de la branche est [`https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev/`](https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev/) et protégé par Cloudflare Access. La politique Allow couvre les adresses `@klirline.ca`; l’accès doit être effectué par un membre de l’équipe. L’hôte personnalisé d’aperçu est préparé, mais ne résout pas encore dans le contrôle réseau.
 - Le Worker API distinct `klirline-social-api` est en ligne sur `https://social-api.klirline.ca`, version `380b7f4d-e117-475b-9327-00be6119526a`. Il utilise D1 `klirline-social`, R2 `klirline-social-media` et les migrations `0001` à `0015`.
 - Le contrôle navigateur de [`/api/health`](https://social-api.klirline.ca/api/health) est `ok:true`: D1, schéma, R2, mode interne, approbation, session, chiffrement des jetons et préparation du bootstrap sont tous valides. [`/api/auth/bootstrap`](https://social-api.klirline.ca/api/auth/bootstrap) répond encore `needsAdmin:true`.
 - Les requêtes D1 de contrôle ont trouvé 0 utilisateur, 0 connexion sociale, 0 publication et 0 programmation avant l’onboarding. Aucun compte social n’a été connecté ni aucune publication réelle envoyée.
-- La configuration CORS de l’API autorise les origines frontend de production et de prévisualisation. Le déploiement de l’API ne touche pas le Worker frontend.
+- La configuration CORS de l’API autorise les origines frontend de production et les previews autorisées, dont `https://commercial-readiness.social-preview.klirline.ca`. L’exception anti-challenge Cloudflare est limitée aux requêtes `/api/*` de cette origine vers `social-api.klirline.ca`. Le déploiement API et l’ajout du domaine preview ne remplacent pas le Worker frontend de production.
 
 ## Première connexion et administrateur
 
@@ -30,7 +30,7 @@ Klirline Social Publisher est un outil interne pour les campagnes de Klirline. I
 
 5. Confirmer que l’interface indique **Connecté**, puis vérifier l’enregistrement d’un brouillon et son approbation avant tout essai de publication.
 
-La connexion du navigateur à l’aperçu n’a pas encore été accomplie. Le frontend `workers.dev` et l’API `klirline.ca` sont des origines distinctes; certains navigateurs peuvent bloquer les cookies intersites. Vérifier la session dans le navigateur réel. Avant les comptes sociaux, si le cookie est bloqué, utiliser un sous-domaine Klirline disponible pour le frontend (par exemple `publisher.klirline.ca` après vérification DNS), ajouter cette origine au CORS de l’API et protéger le nouvel hôte par Access.
+La navigation de l’application et la réponse de l’API ont été vérifiées séparément. L’étape qui reste au titulaire est de se connecter à Access puis de créer le premier administrateur avec sa clé bootstrap. Aucun administrateur, compte social ou post réel n’a encore été créé. Sur `workers.dev`, le cookie de session peut être bloqué comme cookie intersite; si cela arrive, l’hôte personnalisé d’aperçu doit d’abord être rendu joignable et testé.
 
 ## Réseaux et prérequis externes
 
