@@ -37,6 +37,16 @@ Les plafonds opérationnels par défaut sont de 100 profils sociaux et 5 000 pub
 - Mettre en place des sauvegardes D1, une vérification de restauration, alertes de disponibilité, un responsable support interne et les procédures de suppression/révocation.
 - Les politiques de confidentialité et la page de suppression restent nécessaires pour les revues de plateformes et les demandes des personnes concernées; elles doivent correspondre aux pratiques réellement déployées et être validées.
 
+## État actuel de l’essai Klirline
+
+- L’aperçu de la branche `commercial-readiness` est accessible à l’adresse `https://commercial-readiness-klirline-social-publisher.pipoxdavensonazor.workers.dev/` derrière Cloudflare Access (`@klirline.ca`). La navigation entre Créer une publication, Calendrier, Publications, Médias, Comptes sociaux et Préférences a été vérifiée. L’aperçu reste en mode local tant que l’API n’est pas joignable depuis le navigateur.
+- Le contrôle de santé de `https://social-api.klirline.ca/api/health` est vert; `GET /api/auth/bootstrap` répond `needsAdmin: true`. Aucun administrateur, compte social ou publication n’est créé.
+- La vérification depuis l’aperçu échoue avec `Failed to fetch`. Une requête à l’API portant l’origine de l’aperçu a retourné `403` avec l’en-tête Cloudflare `cf-mitigated: challenge`. La variable CORS `FRONTEND_ORIGIN` contient déjà les origines frontend de production et de preview; il faut examiner la mitigation Cloudflare avant de diagnostiquer cela comme une erreur d’origine CORS.
+- N’ajoutez pas une exception anti-bot sans validation du responsable Cloudflare. Si une exception est autorisée, limitez-la à l’origine preview et aux chemins API requis, en gardant les contrôles d’authentification, de CSRF, de rôles et d’approbation de l’application.
+- L’aperçu `workers.dev` et l’API `klirline.ca` sont des sites différents pour les cookies. Les navigateurs qui bloquent les cookies tiers peuvent empêcher la session. Un domaine preview sous une zone Klirline gérée par Cloudflare permettrait d’essayer avec un hôte du même site; dans le compte consulté, le sélecteur de domaine ne proposait pas `klirline.ca` comme zone déjà disponible. Ne lancez pas le transfert ou l’intégration de cette zone sans validation du propriétaire du domaine.
+- Les endpoints publics de l’API signalent les identifiants Meta, LinkedIn, X, Threads et Pinterest manquants. Bluesky est configuré, mais aucun compte n’est autorisé. TikTok reste manuel et Twitch hors périmètre de publication générique.
+- En mode manuel, l’équipe peut tester la préparation d’une campagne et les liens de profils dans l’aperçu. Cela ne publie pas automatiquement et les brouillons/médias du mode local restent sur l’appareil utilisé.
+
 ## Écarts à traiter avant un usage régulier par toute l’équipe
 
 - Appliquer toutes les migrations jusqu’à 0015 avant d’utiliser les brouillons partagés, les métadonnées de campagne, les sessions OAuth Bluesky, les textes alternatifs et plusieurs comptes par réseau. Vérifier `/api/health` après migration.
