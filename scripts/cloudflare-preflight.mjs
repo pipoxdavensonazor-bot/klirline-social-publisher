@@ -6,7 +6,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const api = resolve(root, "cloudflare-api");
 const config = JSON.parse(readFileSync(resolve(api, "wrangler.jsonc"), "utf8"));
 const migrations = readdirSync(resolve(api, "migrations")).filter((name) => /^\d+_.+\.sql$/.test(name)).sort();
-const latestRequiredMigration = 14;
+const latestRequiredMigration = 15;
 const findings = [];
 const fail = (message) => findings.push({ level: "BLOCK", message });
 const warn = (message) => findings.push({ level: "ACTION", message });
