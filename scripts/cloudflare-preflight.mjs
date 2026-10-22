@@ -29,7 +29,7 @@ for (const name of ["META_APP_ID", "LINKEDIN_CLIENT_ID", "THREADS_APP_ID", "X_CL
   if (!config.vars?.[name]) warn(`Configurer ${name} seulement si le parcours correspondant est inclus au lancement.`);
 }
 for (const secret of ["SESSION_SECRET", "BOOTSTRAP_ADMIN_KEY", "TOKENS_ENCRYPTION_KEY_HEX", "META_APP_SECRET", "LINKEDIN_CLIENT_SECRET", "THREADS_APP_SECRET", "X_CLIENT_SECRET", "PINTEREST_APP_SECRET"]) {
-  warn(`Créer/configurer le secret Cloudflare ${secret}; ne pas l'ajouter au dépôt.`);
+  warn(`Définir ou vérifier la valeur du secret Cloudflare ${secret}; ne pas l'ajouter au dépôt.`);
 }
 if (!migrations.length) fail("Aucune migration D1 trouvée.");
 else {
@@ -43,11 +43,11 @@ console.log("Canaux automatiques du Worker: Instagram, Page Facebook, Page Linke
 console.log("Canaux manuels: TikTok (pas de Direct Post pour cet outil interne) et Twitch (pas de post promotionnel générique).");
 warn("Créer et vérifier les identifiants OAuth, domaines/callbacks et accès des comptes sociaux dans les consoles fournisseur.");
 warn("Enregistrer les callbacks Meta (Instagram/Facebook), LinkedIn, Threads, X et Pinterest dans leurs consoles; Bluesky doit servir les métadonnées HTTPS /oauth/bluesky/client-metadata.json et son callback /oauth/bluesky/callback. Aucun secret OAuth partagé n’est requis pour Bluesky.");
-warn("Créer d'abord D1/R2, inscrire l'ID D1 réel dans wrangler.jsonc, configurer les secrets/domaines, appliquer les migrations D1 distantes, puis déployer l'API Worker depuis cloudflare-api.");
-warn("Protéger le Worker frontend klirline-social-publisher lui-même derrière Cloudflare Access avec une politique limitée aux membres Klirline; vérifier aussi l’URL workers.dev et les aperçus. Ne pas mettre les callbacks OAuth de l’API derrière cette politique.");
-warn("Le Worker frontend doit utiliser la racine du dépôt, « npm run build » comme build et « npm run deploy » comme déploiement de production; ne pas utiliser « wrangler preview » en production.");
+warn("Dans Cloudflare, vérifier que D1 et R2 existent, que l'ID D1 correspond à wrangler.jsonc, que les migrations distantes sont appliquées et que le Worker API est déployé depuis cloudflare-api.");
+warn("Vérifier que Cloudflare Access protège toutes les URL du Worker frontend, production et aperçus, avec la politique autorisant uniquement @klirline.ca et une méthode de connexion utilisable par l'équipe. Ne pas mettre les callbacks OAuth de l'API derrière Access.");
+warn("Dans Workers Builds, vérifier la racine /, « npm run build » et « npm run deploy » pour la production; garder « npx wrangler preview » uniquement pour les aperçus.");
 
 for (const { level, message } of findings) console.log(`${level === "BLOCK" ? "❌" : "➡️"} ${level}: ${message}`);
 const blockers = findings.filter(({ level }) => level === "BLOCK");
-console.log(`\nPrévol local: ${blockers.length ? `${blockers.length} blocage(s)` : "configuration structurelle cohérente"}; ${findings.length - blockers.length} action(s) externe(s) à traiter.`);
+console.log(`\nPrévol local: ${blockers.length ? `${blockers.length} blocage(s)` : "configuration structurelle cohérente"}; ${findings.length - blockers.length} élément(s) Cloudflare/fournisseur à configurer ou vérifier hors ligne.`);
 if (blockers.length) process.exitCode = 1;
